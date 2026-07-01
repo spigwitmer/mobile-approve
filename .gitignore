@@ -1,0 +1,83 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+build/
+*.tsbuildinfo
+
+# Package managers (we use npm; lockfile is tracked)
+bun.lockb
+.pnp/
+.yarn/
+
+# Local environment / config
+.env
+.env.*
+!.env.example
+*.local
+
+# Credentials and secrets (defense in depth — the actual creds live in
+# ~/.config/opencode/opencode.json, never in the project, but block these
+# patterns from accidental commit)
+*.pem
+*.key
+*.crt
+*.p12
+secrets/
+credentials/
+*.password
+*.secret
+
+# Backups and editor scratch (python/sed/awk love to leave these around)
+*.bak
+*.backup
+*.old
+*.orig
+*.rej
+*.swp
+*.swo
+*~
+.#*
+\#*\#
+.tmp/
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+plugin-debug.log
+
+# Tooling caches and opencode runtime artifacts
+.cache/
+.turbo/
+.parcel-cache/
+.eslintcache
+.opencode/
+# opencode's per-project server-side state (DB + WAL). Should never
+# be tracked even though it lives next to the project.
+opencode.db
+opencode.db-wal
+opencode.db-shm
+# the user's resume-this-session shortcut (session-id is machine-specific)
+clank.sh
+
+# IDEs and editors
+.vscode/
+.idea/
+*.iml
+.project
+.classpath
+.settings/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Test artifacts
+coverage/
+.nyc_output/
+test-results/
+.playwright/

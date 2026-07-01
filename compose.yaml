@@ -1,0 +1,20 @@
+services:
+  ntfy:
+    image: binwiederhier/ntfy
+    command: serve
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8090:80"
+    environment:
+      NTFY_AUTH_DEFAULT_ACCESS: "deny-all"
+      NTFY_AUTH_FILE: /var/cache/ntfy/user.db
+      NTFY_BEHIND_PROXY: "true"
+      # Patched by bin/setup-serve.sh to your Tailscale MagicDNS URL.
+      # If you edit this manually, run setup-ntfy.sh to recreate the container.
+      NTFY_BASE_URL: https://thinkpat.tail1053be.ts.net
+    volumes:
+      - ntfy-cache:/var/cache/ntfy
+      - ./server.yml:/etc/ntfy/server.yml:ro
+
+volumes:
+  ntfy-cache:

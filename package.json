@@ -1,0 +1,21 @@
+{
+  "type": "module",
+  "name": "mobile-approve",
+  "version": "0.1.0",
+  "private": true,
+  "description": "OpenCode plugin: route permission prompts to your phone via self-hosted ntfy.sh",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "smoke": "tsx scripts/smoke-test.mjs",
+    "test:integration": "tsx scripts/integration-test.mjs",
+    "test": "npm run typecheck && npm run smoke && npm run test:integration"
+  },
+  "dependencies": {
+    "@opencode-ai/plugin": "latest"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.22.4",
+    "typescript": "^5.6.0"
+  }
+}

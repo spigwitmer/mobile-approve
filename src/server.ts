@@ -9,13 +9,16 @@ export type DecisionServer = {
   reviewUrl: (requestId: string, token: string) => string
   listen: () => Promise<{ port: number }>
   stop: () => Promise<void>
-  awaitDecision: (
-    requestId: string,
-    timeoutMs: number,
-    snapshot: PermissionSnapshot
-  ) => Promise<Decision>
+  register: (requestId: string, snapshot: PermissionSnapshot) => void
+  waitForDecision: (requestId: string, timeoutMs: number) => Promise<Decision>
   baseUrl: () => string
   port: () => number
+}
+
+export type ExtraRoute = {
+  method: "GET" | "POST" | "PUT" | "DELETE" | "PATCH"
+  match: (url: URL) => boolean
+  handle: (req: IncomingMessage, res: ServerResponse, url: URL) => Promise<void> | void
 }
 
 export type ServerDeps = {
@@ -23,6 +26,7 @@ export type ServerDeps = {
   host?: string
   publicBaseUrl: string
   store: NonceStore
+  extraRoutes?: ExtraRoute[]
 }
 
 async function readBody(req: IncomingMessage, max = 4096): Promise<string> {
@@ -58,7 +62,7 @@ function sendHtml(res: ServerResponse, status: number, body: string): void {
 }
 
 export function createDecisionServer(deps: ServerDeps): DecisionServer {
-  const { store } = deps
+  const { store, extraRoutes = [] } = deps
   const host = deps.host ?? "127.0.0.1"
   let actualPort = deps.port
 
@@ -68,6 +72,12 @@ export function createDecisionServer(deps: ServerDeps): DecisionServer {
       if (req.method === "GET" && url.pathname === "/health") {
         sendJson(res, 200, { ok: true, pid: process.pid })
         return
+      }
+      for (const route of extraRoutes) {
+        if (req.method === route.method && route.match(url)) {
+          await route.handle(req, res, url)
+          return
+        }
       }
 // The plugin server accepts the requestId in two equivalent forms:
 //   1. Single-segment path (Tailscale Serve's post-strip form):
@@ -175,12 +185,25 @@ export function createDecisionServer(deps: ServerDeps): DecisionServer {
   const reviewUrl = (requestId: string, token: string) =>
     `${baseUrl()}/review/${requestId}?t=${token}`
 
-  const awaitDecision = (
+  const register = (requestId: string, snapshot: PermissionSnapshot): void => {
+    store.register(requestId, {
+      resolve: () => {},
+      reject: () => {},
+      createdAt: Date.now(),
+      permission: snapshot,
+    })
+  }
+
+  const waitForDecision = (
     requestId: string,
-    timeoutMs: number,
-    snapshot: PermissionSnapshot
+    timeoutMs: number
   ): Promise<Decision> =>
     new Promise<Decision>((resolve, reject) => {
+      const existing = store.peek(requestId)
+      if (!existing) {
+        reject(new Error("unknown or expired request"))
+        return
+      }
       const timer = setTimeout(() => {
         const p = store.consume(requestId)
         if (p) {
@@ -198,8 +221,8 @@ export function createDecisionServer(deps: ServerDeps): DecisionServer {
           clearTimeout(timer)
           reject(e)
         },
-        createdAt: Date.now(),
-        permission: snapshot,
+        createdAt: existing.createdAt,
+        permission: existing.permission,
       })
     })
 
@@ -208,7 +231,8 @@ export function createDecisionServer(deps: ServerDeps): DecisionServer {
     reviewUrl,
     listen,
     stop,
-    awaitDecision,
+    register,
+    waitForDecision,
     baseUrl,
     port: () => actualPort,
   }

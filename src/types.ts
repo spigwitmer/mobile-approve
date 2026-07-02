@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto"
 
 export type PluginOptions = {
   callbackPort?: number
+  brokerBaseUrl?: string
   defaultTimeoutMs?: number
   hmacSecretEnv?: string
   nonceTtlMs?: number
@@ -18,6 +19,7 @@ export type PluginOptions = {
 }
 
 export type ResolvedConfig = {
+  brokerBaseUrl: string
   callbackPort: number
   defaultTimeoutMs: number
   hmacSecret: string
@@ -30,6 +32,7 @@ export type ResolvedConfig = {
 }
 
 export const DEFAULTS: Required<Omit<PluginOptions, "ntfy" | "tunnel">> = {
+  brokerBaseUrl: "",
   callbackPort: 7461,
   defaultTimeoutMs: 300_000,
   hmacSecretEnv: "MOBILE_APPROVE_SECRET",
@@ -61,6 +64,8 @@ export function resolveConfig(opts: PluginOptions = {}): ResolvedConfig {
     )
   }
   return {
+    brokerBaseUrl:
+      opts.brokerBaseUrl ?? `http://127.0.0.1:${opts.callbackPort ?? DEFAULTS.callbackPort}`,
     callbackPort: opts.callbackPort ?? DEFAULTS.callbackPort,
     defaultTimeoutMs: opts.defaultTimeoutMs ?? DEFAULTS.defaultTimeoutMs,
     hmacSecret: secret,

@@ -29,7 +29,8 @@ const snapshot = {
   callID: "call-1",
   createdAt: Date.now(),
 }
-const decisionPromise = server.awaitDecision(requestId, 10_000, snapshot)
+server.register(requestId, snapshot)
+const decisionPromise = server.waitForDecision(requestId, 10_000)
 
 // 1) GET /<id>?t=<token> renders the simplified UI.
 // (Tailscale Serve strips the "/review" prefix when forwarding, so the
@@ -47,7 +48,8 @@ console.log("hidden textarea id:", html.includes("id=\"command\"") && html.inclu
 const requestIdArr = crypto.randomUUID()
 const tokArr = signToken("test-secret", requestIdArr)
 const snapArr = { ...snapshot, id: requestIdArr, pattern: ["rm *", "rm -rf *"] }
-const dpArr = server.awaitDecision(requestIdArr, 10_000, snapArr)
+server.register(requestIdArr, snapArr)
+const dpArr = server.waitForDecision(requestIdArr, 10_000)
 const htmlArrRes = await fetch(`${publicBaseUrl}/${requestIdArr}?t=${tokArr}`)
 const htmlArr = await htmlArrRes.text()
 console.log("array-pattern review html status:", htmlArrRes.status)
@@ -83,7 +85,8 @@ console.log("scenario A:", v1.status, v1.scope)
 const requestIdB = crypto.randomUUID()
 const tokB = signToken("test-secret", requestIdB)
 const snapB = { ...snapshot, id: requestIdB }
-const dpB = server.awaitDecision(requestIdB, 10_000, snapB)
+server.register(requestIdB, snapB)
+const dpB = server.waitForDecision(requestIdB, 10_000)
 await postDecision(requestIdB, {
   status: "allow",
   scope: "always",
@@ -117,7 +120,8 @@ console.log("sess-B still present (touched):", wlB_size_after === 0 && sessionsA
 const requestIdC = crypto.randomUUID()
 const tokC = signToken("test-secret", requestIdC)
 const snapC = { ...snapshot, id: requestIdC }
-const dpC = server.awaitDecision(requestIdC, 10_000, snapC)
+server.register(requestIdC, snapC)
+const dpC = server.waitForDecision(requestIdC, 10_000)
 await postDecision(requestIdC, { status: "deny", scope: "once" })
 const v3 = await dpC
 console.log("scenario C:", v3.status, v3.scope)

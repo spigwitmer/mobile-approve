@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# Standalone mobile-approve-broker entry point. Run directly, or as a
+# systemd / launchd user service. The broker listens on 127.0.0.1:7461
+# (configurable via MOBILE_APPROVE_PORT) and exposes the Tailscale-routed
+# review / decide endpoints plus the plugin-facing /v1/* API.
+#
+# Runtime autodetection (in priority order):
+#   1. bun         (handles .ts directly, fastest)
+#   2. tsx         (./node_modules/.bin/tsx if installed locally)
+#   3. npx + tsx   (falls back to whatever's in $PATH)
+#   4. node + --import tsx
+set -euo pipefail
+
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
+PLUGIN_DIR="$( cd "$SCRIPT_DIR/.." >/dev/null 2>&1 && pwd )"
+ENTRY="$PLUGIN_DIR/src/broker-cli.ts"
+
+run_with() {
+  echo "mobile-approve-broker: $*" >&2
+  exec "$@" "$ENTRY" "$@"
+}
+
+if command -v bun >/dev/null 2>&1; then
+  run_with bun run
+elif [ -x "$PLUGIN_DIR/node_modules/.bin/tsx" ]; then
+  run_with "$PLUGIN_DIR/node_modules/.bin/tsx"
+elif command -v tsx >/dev/null 2>&1; then
+  run_with tsx
+elif command -v npx >/dev/null 2>&1 && [ -d "$PLUGIN_DIR/node_modules" ]; then
+  run_with npx tsx
+elif command -v node >/dev/null 2>&1; then
+  NODE_OPTIONS="--import tsx" run_with node
+else
+  echo "mobile-approve-broker: no JS runtime found." >&2
+  echo "  Need one of: bun, tsx, npx+tsx, or node (with tsx installed locally)" >&2
+  exit 1
+fi

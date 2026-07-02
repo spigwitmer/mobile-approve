@@ -1,42 +1,8 @@
 import type { Plugin } from "@opencode-ai/plugin"
 import type { Permission } from "@opencode-ai/sdk"
 import { resolveConfig, type PluginOptions } from "./types.js"
-import {
-  newRequestId,
-  NonceStore,
-  SessionWhitelists,
-  signToken,
-} from "./security.js"
-import { createDecisionServer } from "./server.js"
-import { publishAsk } from "./ntfy.js"
+import { BrokerClient } from "./client.js"
 
-function snapshotPermission(input: Permission) {
-  const createdAt =
-    typeof input.time?.created === "number" ? input.time.created : Date.now()
-  return {
-    id: input.id,
-    type: input.type,
-    title: input.title,
-    pattern: input.pattern,
-    metadata: input.metadata,
-    sessionID: input.sessionID,
-    messageID: input.messageID,
-    callID: input.callID,
-    createdAt,
-  }
-}
-
-function firstPattern(p: Permission["pattern"]): string {
-  if (Array.isArray(p)) return p[0] ?? ""
-  return p ?? ""
-}
-
-// v1.17.12 publishes permission asks as "permission.asked" events with the
-// shape declared in @opencode-ai/sdk as EventPermissionAsked (NOT
-// "permission.updated" which the SDK v1 types are stale on, and NOT
-// "permission.v2.asked" which is the literal name in the V2 module but not
-// what the runtime actually emits). This mapper normalizes the wire shape
-// into the V1 Permission object the rest of the plugin works with.
 function mapPermissionAskedToPermission(p: Record<string, unknown>): Permission {
   const id = typeof p.id === "string" ? p.id : ""
   const sessionID = typeof p.sessionID === "string" ? p.sessionID : ""
@@ -67,31 +33,36 @@ function mapPermissionAskedToPermission(p: Record<string, unknown>): Permission 
   }
 }
 
-function buildNotification(
-  snapshot: ReturnType<typeof snapshotPermission>,
-  reviewUrl: string
-): { title: string; body: string; priority: 1 | 2 | 3 | 4 | 5; tags: string[] } {
-  const title = `opencode wants to ${snapshot.title || snapshot.type}`
-  const lines: string[] = []
-  lines.push(`tool: ${snapshot.type}`)
-  if (snapshot.pattern) {
-    const p = Array.isArray(snapshot.pattern)
-      ? snapshot.pattern.join(" | ")
-      : snapshot.pattern
-    lines.push(`pattern: ${p}`)
+function firstPattern(p: Permission["pattern"]): string {
+  if (!p) return ""
+  if (Array.isArray(p)) return p[0] ?? ""
+  return p
+}
+
+function patternMatches(pattern: string, candidate: string): boolean {
+  if (pattern === candidate) return true
+  let pi = 0
+  let ci = 0
+  let star = -1
+  let matchPos = 0
+  while (ci < candidate.length) {
+    if (pi < pattern.length && pattern[pi] === candidate[ci]) {
+      pi++
+      ci++
+    } else if (pi < pattern.length && pattern[pi] === "*") {
+      star = pi
+      matchPos = ci
+      pi++
+    } else if (star !== -1) {
+      pi = star + 1
+      matchPos++
+      ci = matchPos
+    } else {
+      return false
+    }
   }
-  if (snapshot.metadata && typeof snapshot.metadata === "object") {
-    const md = snapshot.metadata as Record<string, unknown>
-    if (typeof md.cwd === "string") lines.push(`cwd: ${md.cwd}`)
-  }
-  lines.push("")
-  lines.push(`Open on your phone: ${reviewUrl}`)
-  return {
-    title,
-    body: lines.join("\n"),
-    priority: 4,
-    tags: ["warning"],
-  }
+  while (pi < pattern.length && pattern[pi] === "*") pi++
+  return pi === pattern.length
 }
 
 export default (async ({ client }, options?: PluginOptions) => {
@@ -119,25 +90,23 @@ export default (async ({ client }, options?: PluginOptions) => {
     })
   }
 
-  const store = new NonceStore(cfg.nonceTtlMs)
-  const whitelists = new SessionWhitelists()
-  const server = createDecisionServer({
-    port: cfg.callbackPort,
-    publicBaseUrl: cfg.tunnel!.publicBaseUrl,
-    store,
+  const broker = new BrokerClient({
+    baseUrl: cfg.brokerBaseUrl,
   })
-  await server.listen()
-  log("info", "decision server listening", {
-    port: server.port(),
-    callback: server.baseUrl(),
-  })
-  if (cfg.hmacSecretGenerated) {
+
+  // Verify the broker is reachable on plugin load. Log a clear error and
+  // continue without phone approval if it's not (the in-TUI prompt still
+  // works as a fallback).
+  try {
+    await broker.health()
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err)
     log(
       "warn",
-      "MOBILE_APPROVE_SECRET was not set; generated a random per-session secret. " +
-        "Phone approvals will not survive an opencode restart. " +
-        "Add 'export MOBILE_APPROVE_SECRET=\"<base64>\"' to your shell rcfile.",
-      { envVar: cfg.hmacSecretEnv }
+      "mobile-approve broker is unreachable; phone approval disabled. " +
+        "Run `bin/setup-broker.sh` to install the broker. " +
+        "The in-TUI permission prompt still works.",
+      { reason, brokerUrl: broker.url }
     )
   }
 
@@ -146,10 +115,11 @@ export default (async ({ client }, options?: PluginOptions) => {
     hint: string
   ): Promise<void> {
     try {
-      await client.session.prompt({
+      await client.session.promptAsync({
         path: { id: sessionID },
         body: {
-          parts: [{ type: "text", text: hint }],
+          noReply: true,
+          parts: [{ type: "text", text: hint, synthetic: true }],
         },
       })
       log("info", "agent hint sent", { sessionID, length: hint.length })
@@ -167,24 +137,6 @@ export default (async ({ client }, options?: PluginOptions) => {
     response: "once" | "always" | "reject",
     label: string
   ): Promise<void> {
-    // v1.17.12 publishes V2 permission events but the OpencodeClient we
-    // receive is the V1 SDK client (which still exposes V1-shaped methods).
-    // Try two reply paths:
-    //
-    //   1. V1 endpoint: client.postSessionIdPermissionsPermissionId
-    //      URL: /session/{id}/permissions/{permissionID}
-    //      Body: { response }
-    //
-    //   2. V2 endpoint (raw HTTP via the underlying hey-api client):
-    //      URL: /api/session/{sessionID}/permission/{requestID}/reply
-    //      Body: { reply }
-    //
-    // IMPORTANT: the V1 method is defined on the OpencodeClient prototype
-    // and calls this._client.post(...) internally. Extracting it as
-    // `const v1 = client.postSessionIdPermissionsPermissionId` and calling
-    // `v1(...)` loses the `this` binding, and the SDK throws
-    // "undefined is not an object (evaluating 'this._client')". Always
-    // call it as a method: `client.postSessionIdPermissionsPermissionId(...)`.
     const c = client as unknown as {
       postSessionIdPermissionsPermissionId?: (opts: {
         body?: { response: "once" | "always" | "reject" }
@@ -268,10 +220,25 @@ export default (async ({ client }, options?: PluginOptions) => {
     seenRequestIds.add(input.id)
     setTimeout(() => seenRequestIds.delete(input.id), 5 * 60_000)
 
-    const whitelist = whitelists.for(input.sessionID)
     const pattern = firstPattern(input.pattern)
 
-    if (pattern && whitelist.matches(input.type, pattern)) {
+    // Whitelist check via broker
+    let whitelisted = false
+    if (pattern) {
+      try {
+        whitelisted = await brokerWhitelisted(
+          input.sessionID,
+          input.type,
+          pattern
+        )
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : String(err)
+        log("warn", "broker whitelist check failed; falling through to phone", {
+          reason,
+        })
+      }
+    }
+    if (whitelisted) {
       log("debug", "whitelist hit; auto-allow", {
         requestId: input.id,
         sessionID: input.sessionID,
@@ -291,49 +258,43 @@ export default (async ({ client }, options?: PluginOptions) => {
       return
     }
 
-    const requestId = newRequestId()
-    const token = signToken(cfg.hmacSecret, requestId)
-    const reviewUrl = server.reviewUrl(requestId, token)
-    const snapshot = snapshotPermission(input)
-
-    log("info", "permission.asked received -> publishing to phone", {
-      opencodeRequestId: input.id,
-      internalRequestId: requestId,
-      tool: input.type,
-      title: input.title,
-      pattern,
-      sessionID: input.sessionID,
-      reviewUrl,
-    })
-
+    // Submit to broker (publishes to ntfy + registers for phone callback)
+    let requestId: string
     try {
-      await publishAsk({
-        baseUrl: cfg.ntfy!.baseUrl,
-        topic: cfg.ntfy!.topic,
-        user: cfg.ntfy!.user,
-        password: cfg.ntfy!.password,
-        requestId,
-        token,
-        reviewUrl,
-        ...buildNotification(snapshot, reviewUrl),
+      const askResult = await broker.ask({
+        sessionID: input.sessionID,
+        permissionID: input.id,
+        tool: input.type,
+        title: input.title || input.type,
+        pattern: input.pattern,
+        metadata: input.metadata,
       })
-      log("info", "ntfy notification published", { requestId })
+      requestId = askResult.requestId
     } catch (err) {
+      // Broker is down (or misbehaving). Don't auto-deny — that would silently
+      // block the user. Let opencode's in-TUI prompt take over so the user
+      // can still approve/deny from the terminal. The next time the broker
+      // is healthy, the phone path will resume.
       const reason = err instanceof Error ? err.message : String(err)
-      log("error", "ntfy publish failed; callback-only fallback", {
-        requestId,
-        reason,
-      })
+      log(
+        "error",
+        "broker ask failed; in-TUI prompt will handle this permission",
+        {
+          opencodeRequestId: input.id,
+          reason,
+        }
+      )
+      return
     }
 
     try {
-      const decision = await server.awaitDecision(
+      const decision = await broker.waitForDecision(
         requestId,
-        cfg.defaultTimeoutMs,
-        snapshot
+        cfg.defaultTimeoutMs
       )
       log("info", "decision received", {
         requestId,
+        opencodeRequestId: input.id,
         status: decision.status,
         scope: decision.scope,
         hasCommand: typeof decision.command === "string",
@@ -347,16 +308,12 @@ export default (async ({ client }, options?: PluginOptions) => {
             ? "always"
             : "once"
 
-      try {
-        await replyToOpencode(
-          input.sessionID,
-          input.id,
-          response,
-          "phone-decision"
-        )
-      } catch {
-        /* logged */
-      }
+      await safeReplyToOpencode(
+        input.sessionID,
+        input.id,
+        response,
+        "phone-decision"
+      )
 
       if (decision.status === "allow" && decision.scope === "always") {
         const p =
@@ -364,13 +321,12 @@ export default (async ({ client }, options?: PluginOptions) => {
             ? decision.patterns[0]
             : pattern
         if (p) {
-          whitelist.add(input.type, p)
-          log("info", "whitelist updated", {
-            sessionID: input.sessionID,
-            tool: input.type,
-            pattern: p,
-            total: whitelist.size(),
-          })
+          try {
+            await broker.addWhitelist(input.sessionID, input.type, p)
+          } catch (err) {
+            const reason = err instanceof Error ? err.message : String(err)
+            log("warn", "broker addWhitelist failed", { reason })
+          }
         }
       }
 
@@ -378,40 +334,60 @@ export default (async ({ client }, options?: PluginOptions) => {
         await sendAgentHint(input.sessionID, decision.agentHint)
       }
     } catch (err) {
+      // Phone didn't respond in time (default 5 min). Let the in-TUI prompt
+      // handle it rather than silently denying the action.
       const reason = err instanceof Error ? err.message : String(err)
-      log("warn", "default-deny (no reply)", {
-        requestId,
-        opencodeRequestId: input.id,
-        reason,
-        tool: input.type,
-      })
-      try {
-        await replyToOpencode(
-          input.sessionID,
-          input.id,
-          "reject",
-          "default-deny-timeout"
-        )
-      } catch {
-        /* logged */
-      }
+      log(
+        "warn",
+        "phone did not respond in time; in-TUI prompt will handle this permission",
+        {
+          requestId,
+          opencodeRequestId: input.id,
+          reason,
+          tool: input.type,
+          timeoutMs: cfg.defaultTimeoutMs,
+        }
+      )
+      return
+    }
+  }
+
+  async function brokerWhitelisted(
+    sessionID: string,
+    tool: string,
+    pattern: string
+  ): Promise<boolean> {
+    const wl = await broker.getWhitelist(sessionID)
+    const patterns = wl[tool] ?? []
+    return patterns.some((p) => patternMatches(p, pattern))
+  }
+
+  async function safeReplyToOpencode(
+    sessionID: string,
+    permissionID: string,
+    response: "once" | "always" | "reject",
+    label: string
+  ): Promise<void> {
+    try {
+      await replyToOpencode(sessionID, permissionID, response, label)
+    } catch {
+      /* already logged */
     }
   }
 
   return {
     dispose: async () => {
-      await server.stop()
+      // No HTTP server to stop — the broker runs as a separate process.
     },
 
     event: async ({ event }) => {
-      // v1.17.12 publishes "permission.asked" events with the V1-shaped
-      // EventPermissionAsked payload (id, sessionID, permission, patterns,
-      // metadata, always, tool). Listen for that name and map the payload
-      // into the V1 Permission object the rest of the plugin works with.
+      // v1.17.12 emits "permission.asked" events (not "permission.updated"
+      // as the V1 SDK type claims). The runtime event type is broader than
+      // the SDK's `Event` union, so we cast to read the actual properties.
       const evt = event as unknown as { type: string; properties?: unknown }
       if (evt.type === "permission.asked") {
         log("info", "permission.asked received", {
-          propKeys: evt.properties ? Object.keys(evt.properties) : null,
+          propKeys: Object.keys((evt.properties ?? {}) as object),
         })
         const p = mapPermissionAskedToPermission(
           (evt.properties ?? {}) as Record<string, unknown>
@@ -420,13 +396,14 @@ export default (async ({ client }, options?: PluginOptions) => {
         return
       }
 
-      if (event.type === "session.deleted") {
-        const sessionID = event.properties.info.id
-        whitelists.delete(sessionID)
-        log("info", "session deleted; whitelist cleared", {
-          sessionID,
-          remainingSessions: whitelists.sessionCount(),
-        })
+      if (evt.type === "session.deleted") {
+        const sessionID = (evt.properties as { info: { id: string } }).info.id
+        try {
+          await broker.forgetSession(sessionID)
+        } catch (err) {
+          const reason = err instanceof Error ? err.message : String(err)
+          log("warn", "broker forgetSession failed", { sessionID, reason })
+        }
         return
       }
     },

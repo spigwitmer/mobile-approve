@@ -130,11 +130,30 @@ Generate the HMAC secret once per workstation:
 export MOBILE_APPROVE_SECRET="$(head -c 32 /dev/urandom | base64)"
 ```
 
-Persist it in your shell rcfile so every opencode launch sees it.
+Persist it in your shell rcfile so every opencode launch sees it. (The broker also reads this — set it on the workstation where the broker runs, or in the broker's systemd EnvironmentFile.)
 
-Restart opencode. The first time the plugin runs it logs `decision server listening` at INFO.
+### A6. Install the broker
 
-### A6. Smoke test
+The broker is the long-running daemon that owns the HTTP server, ntfy publish, and the shared whitelist. It listens on `127.0.0.1:7461` and exposes the `/v1/*` API to the plugin. Without the broker, the plugin falls back to the in-TUI prompt (no phone approval).
+
+Two deployment paths; `bin/setup-broker.sh` autodetects:
+
+```sh
+./bin/setup-broker.sh
+```
+
+- **Path A — systemd user service (recommended)** — if `systemctl --user` works, the script writes `~/.config/systemd/user/mobile-approve-broker.service` and `~/.config/mobile-approve/broker.env` (chmod 600 — contains the ntfy password), then `systemctl --user enable --now mobile-approve-broker.service`. Survives reboots, auto-restarts on crash. Logs go to journald: `journalctl --user -u mobile-approve-broker -f`.
+- **Path B — docker alongside ntfy** — if no systemd --user is available, the script appends a `broker` service to `compose.yaml` and runs `docker compose up -d broker`. The broker uses `oven/bun:1` and connects to ntfy via compose's internal DNS.
+
+Re-run `bin/setup-broker.sh` after changing any field in the opencode.json mobile-approve entry — it regenerates the env file / compose patch from the latest config.
+
+If you want a non-default port, set `MOBILE_APPROVE_PORT` in the env file (or change `ports:` in compose.yaml) and add `brokerBaseUrl` to the plugin's opencode.json entry:
+
+```json
+"brokerBaseUrl": "http://127.0.0.1:8000"
+```
+
+### A7. Smoke test
 
 From the `mobile-approve` repo, run:
 
@@ -142,7 +161,7 @@ From the `mobile-approve` repo, run:
 ./bin/status.sh
 ```
 
-Expected output (with everything deployed): all green checks. The script verifies the Tailscale daemon, the three serve rules, the ntfy container, the ntfy local health endpoint, and (once opencode is running) the plugin's local health endpoint.
+Expected output (with everything deployed): all green checks. The script verifies the Tailscale daemon, the three serve rules, the ntfy container, the ntfy local health endpoint, the broker process + /v1/health, and the opencode install.
 
 Then trigger an end-to-end test:
 
@@ -156,7 +175,9 @@ Then trigger an end-to-end test:
 
    Your phone should buzz.
 
-2. Trigger a permission ask in opencode — set `"bash": "ask"` and run a command. The plugin logs `ntfy notification published`. The phone receives the notification; tapping the body opens `https://<laptop>.<tailnet>.ts.net/review/<id>?t=<token>` in the phone's browser.
+2. Trigger a permission ask in opencode — set `"bash": "ask"` and run a command. The plugin logs `permission.asked received` (the in-process dedupe + the /v1/ask to the broker). The broker logs `ask -> publishing to phone` and `ntfy notification published`. The phone receives the notification; tapping the body opens `https://<laptop>.<tailnet>.ts.net/review/<id>?t=<token>` in the phone's browser.
+
+3. From a second opencode session (different terminal: `opencode -s <other-session>`), trigger another permission ask. The phone receives the second notification. The whitelist is shared — if you `Allow always` from session A, session B's matching tool calls skip the phone roundtrip.
 
 ---
 

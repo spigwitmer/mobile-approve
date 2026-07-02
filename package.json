@@ -8,7 +8,8 @@
     "typecheck": "tsc --noEmit",
     "smoke": "tsx scripts/smoke-test.mjs",
     "test:integration": "tsx scripts/integration-test.mjs",
-    "test": "npm run typecheck && npm run smoke && npm run test:integration"
+    "test:broker": "tsx scripts/broker-smoke.mjs",
+    "test": "npm run typecheck && npm run smoke && npm run test:integration && npm run test:broker"
   },
   "dependencies": {
     "@opencode-ai/plugin": "latest"

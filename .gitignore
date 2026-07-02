@@ -81,3 +81,6 @@ coverage/
 .nyc_output/
 test-results/
 .playwright/
+
+# Project tracker (working notes, machine-local; re-project-tracker skill)
+project-tracker/

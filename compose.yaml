@@ -16,5 +16,36 @@ services:
       - ntfy-cache:/var/cache/ntfy
       - ./server.yml:/etc/ntfy/server.yml:ro
 
+  broker:
+    # We use node:22-bookworm-slim instead of oven/bun:1 because bun's HTTP
+    # server has been observed to reset TCP connections in some environments
+    # (the broker starts cleanly, logs "broker ready", but the first HTTP
+    # request gets a TCP RST). node's HTTP server is stable.
+    image: node:22-bookworm-slim
+    command: ["sh", "-c", "npm install --no-save tsx && node --import tsx src/broker-cli.ts"]
+    restart: unless-stopped
+    working_dir: /app
+    ports:
+      - "127.0.0.1:7461:7461"
+    # Sensitive values (ntfy password, HMAC secret) are read from the
+    # project's .env file (which is gitignored). Copy .env.example to .env
+    # and fill in the real values. See docs/install.md.
+    env_file:
+      - .env
+    environment:
+      MOBILE_APPROVE_PORT: "7461"
+      MOBILE_APPROVE_LOG_LEVEL: "info"
+      MOBILE_APPROVE_PUBLIC_URL: ${MOBILE_APPROVE_PUBLIC_URL:?set in .env}
+      MOBILE_APPROVE_NTFY_BASE_URL: ${MOBILE_APPROVE_NTFY_BASE_URL:?set in .env}
+      MOBILE_APPROVE_NTFY_TOPIC: ${MOBILE_APPROVE_NTFY_TOPIC:?set in .env}
+      MOBILE_APPROVE_NTFY_USER: ${MOBILE_APPROVE_NTFY_USER:?set in .env}
+      MOBILE_APPROVE_NTFY_PASSWORD: ${MOBILE_APPROVE_NTFY_PASSWORD:?set in .env}
+    volumes:
+      - ./src:/app/src
+      - ./package.json:/app/package.json
+      - ./tsconfig.json:/app/tsconfig.json
+    depends_on:
+      - ntfy
+
 volumes:
   ntfy-cache:

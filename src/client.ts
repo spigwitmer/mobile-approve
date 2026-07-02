@@ -30,11 +30,17 @@ export class BrokerError extends Error {
 
 export class BrokerClient {
   private baseUrl: string
-  private fetch: typeof globalThis.fetch
+  private explicitFetch: typeof globalThis.fetch | undefined
 
   constructor(opts: BrokerClientOptions) {
     this.baseUrl = opts.baseUrl.replace(/\/$/, "")
-    this.fetch = opts.fetch ?? globalThis.fetch
+    this.explicitFetch = opts.fetch
+  }
+
+  // Look up `fetch` lazily so tests can monkey-patch `globalThis.fetch`
+  // after the client is constructed.
+  private get fetch(): typeof globalThis.fetch {
+    return this.explicitFetch ?? globalThis.fetch
   }
 
   async health(): Promise<BrokerHealth> {

@@ -9,7 +9,8 @@
     "smoke": "tsx scripts/smoke-test.mjs",
     "test:integration": "tsx scripts/integration-test.mjs",
     "test:broker": "tsx scripts/broker-smoke.mjs",
-    "test": "npm run typecheck && npm run smoke && npm run test:integration && npm run test:broker"
+    "test:persistence": "tsx scripts/persistence-test.mjs",
+    "test": "npm run typecheck && npm run smoke && npm run test:integration && npm run test:broker && npm run test:persistence"
   },
   "dependencies": {
     "@opencode-ai/plugin": "latest"

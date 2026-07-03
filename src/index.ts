@@ -138,7 +138,59 @@ export default (async ({ client }, options?: PluginOptions) => {
     }
   }
 
-  const seenRequestIds = new Set<string>()
+  // Walk the parts of the message that triggered this permission ask, and
+  // return the first non-synthetic text part (the agent's "reason" preamble
+  // before it issued the tool call). Returns null if none is found. Never
+  // throws — the phone path must keep working when the message endpoint is
+  // flaky or the agent emitted only a tool call with no preamble.
+  async function fetchModelExplanation(
+    sessionID: string,
+    messageID: string
+  ): Promise<string | null> {
+    if (!sessionID || !messageID) return null
+    const c = client as unknown as {
+      session?: {
+        message?: (opts: {
+          path: { sessionID: string; messageID: string }
+        }) => Promise<{
+          data?: {
+            info?: unknown
+            parts?: Array<{
+              type?: string
+              text?: string
+              synthetic?: boolean
+            }>
+          }
+          error?: unknown
+        }>
+      }
+    }
+    const fn = c.session?.message
+    if (typeof fn !== "function") return null
+    try {
+      const result = await fn({ path: { sessionID, messageID } })
+      const parts = result?.data?.parts
+      if (!Array.isArray(parts)) return null
+      for (const part of parts) {
+        if (!part || typeof part !== "object") continue
+        if (part.type !== "text") continue
+        if (part.synthetic === true) continue
+        if (typeof part.text === "string" && part.text.length > 0) {
+          return part.text
+        }
+      }
+      return null
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err)
+      log("warn", "fetchModelExplanation failed; page will omit Why", {
+        reason,
+      })
+      return null
+    }
+  }
+
+  const seenRequestIds = new Map<string, number>()
+  const SEEN_MAX_ENTRIES = 4096
 
   async function replyToOpencode(
     sessionID: string,
@@ -226,7 +278,11 @@ export default (async ({ client }, options?: PluginOptions) => {
       })
       return
     }
-    seenRequestIds.add(input.id)
+    seenRequestIds.set(input.id, Date.now())
+    if (seenRequestIds.size > SEEN_MAX_ENTRIES) {
+      const oldest = seenRequestIds.keys().next().value
+      if (oldest !== undefined) seenRequestIds.delete(oldest)
+    }
     setTimeout(() => seenRequestIds.delete(input.id), 5 * 60_000)
 
     // Bail out if the user has toggled phone notifications off (via the
@@ -279,6 +335,13 @@ export default (async ({ client }, options?: PluginOptions) => {
       return
     }
 
+    // Fetch the agent's preamble (the "Why:" text on the review page).
+    // Done before broker.ask so the result rides into AskInput.modelExplanation.
+    // Never throws; null -> omit the blockquote.
+    const modelExplanation =
+      (await fetchModelExplanation(input.sessionID, input.messageID)) ??
+      undefined
+
     // Submit to broker (publishes to ntfy + registers for phone callback)
     let requestId: string
     try {
@@ -289,6 +352,7 @@ export default (async ({ client }, options?: PluginOptions) => {
         title: input.title || input.type,
         pattern: input.pattern,
         metadata: input.metadata,
+        modelExplanation,
       })
       requestId = askResult.requestId
     } catch (err) {

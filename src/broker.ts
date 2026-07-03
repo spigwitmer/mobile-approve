@@ -1,14 +1,17 @@
 import { createDecisionServer, type ExtraRoute } from "./server.js"
 import { publishAsk } from "./ntfy.js"
-import { renderReviewPage } from "./webui.js"
+import { renderReviewPage } from "./webui.js" // used by _internal re-export
 import {
+  defaultWhitelistPath,
   newRequestId,
   NonceStore,
   SessionWhitelists,
   signToken,
+  WhitelistPersistence,
 } from "./security.js"
 import type {
   Decision,
+  FileDiffEntry,
   PermissionSnapshot,
   ResolvedConfig,
 } from "./types.js"
@@ -27,6 +30,9 @@ export type AskInput = {
   title: string
   pattern?: string | string[]
   metadata?: Record<string, unknown>
+  diff?: string
+  filediff?: FileDiffEntry[]
+  modelExplanation?: string
 }
 
 export type AskResult = {
@@ -45,11 +51,15 @@ export interface Broker {
     timeoutMs: number
   ): Promise<Decision>
 
-  matches(sessionID: string, tool: string, pattern: string): boolean
   addWhitelist(sessionID: string, tool: string, pattern: string): void
   forgetSession(sessionID: string): void
-  whitelistSize(): number
-  whitelistSessionCount(): number
+
+  getPendingSnapshot(): Array<{
+    requestId: string
+    sessionID: string
+    tool: string
+    ageMs: number
+  }>
 
   port(): number
   baseUrl(): string
@@ -153,6 +163,16 @@ export function createBroker(opts: BrokerOptions): Broker {
   const store = new NonceStore(cfg.nonceTtlMs)
   const whitelists = new SessionWhitelists()
 
+  const persistence: WhitelistPersistence | null = (() => {
+    const resolved =
+      typeof cfg.whitelistPath === "string" && cfg.whitelistPath.length > 0
+        ? cfg.whitelistPath
+        : defaultWhitelistPath()
+    return new WhitelistPersistence(resolved, (err) => {
+      log("warn", err.message)
+    })
+  })()
+
   function snapshotFromAsk(input: AskInput): PermissionSnapshot {
     return {
       id: input.permissionID,
@@ -163,6 +183,9 @@ export function createBroker(opts: BrokerOptions): Broker {
       sessionID: input.sessionID,
       messageID: "",
       createdAt: Date.now(),
+      diff: input.diff,
+      filediff: input.filediff,
+      modelExplanation: input.modelExplanation,
     }
   }
 
@@ -172,16 +195,17 @@ export function createBroker(opts: BrokerOptions): Broker {
   let server: ReturnType<typeof createDecisionServer>
 
   async function ask(input: AskInput): Promise<AskResult> {
+    if (!server) throw new Error("broker server not initialized")
     const requestId = newRequestId()
     const token = signToken(cfg.hmacSecret, requestId)
-    const reviewUrl = server!.reviewUrl(requestId, token)
-    const callbackUrl = server!.url(requestId, token)
+    const reviewUrl = server.reviewUrl(requestId, token)
+    const callbackUrl = server.url(requestId, token)
     const snapshot = snapshotFromAsk(input)
 
     // Register the pending request BEFORE publishing to ntfy. A fast phone
     // tap (sub-100ms) would otherwise race against the registration and
     // get a 410 from the server.
-    server!.register(requestId, snapshot)
+    server.register(requestId, snapshot, cfg.hmacSecret)
 
     log("info", "ask -> publishing to phone", {
       opencodeRequestId: input.permissionID,
@@ -227,15 +251,6 @@ export function createBroker(opts: BrokerOptions): Broker {
     return server!.waitForDecision(requestId, timeoutMs)
   }
 
-  function matches(
-    sessionID: string,
-    tool: string,
-    pattern: string
-  ): boolean {
-    if (!pattern) return false
-    return whitelists.for(sessionID).matches(tool, pattern)
-  }
-
   function addWhitelist(
     sessionID: string,
     tool: string,
@@ -248,6 +263,7 @@ export function createBroker(opts: BrokerOptions): Broker {
       pattern,
       total: whitelists.totalSize(),
     })
+    persistWhitelists()
   }
 
   function forgetSession(sessionID: string): void {
@@ -258,6 +274,30 @@ export function createBroker(opts: BrokerOptions): Broker {
         sessionID,
         remainingSessions: whitelists.sessionCount(),
       })
+      persistWhitelists()
+    }
+  }
+
+  function persistWhitelists(): void {
+    if (!persistence) return
+    const snapshot = whitelists.snapshotAll()
+    log("debug", "persisting whitelist", {
+      path: persistence.getPath(),
+      sessions: Object.keys(snapshot).length,
+    })
+    persistence.save(snapshot)
+  }
+
+  function loadPersistedWhitelists(): void {
+    if (!persistence) return
+    const data = persistence.load()
+    whitelists.loadSnapshot(data)
+    if (whitelists.sessionCount() > 0) {
+      log("info", "whitelist loaded from disk", {
+        path: persistence.getPath(),
+        sessions: whitelists.sessionCount(),
+        total: whitelists.totalSize(),
+      })
     }
   }
 
@@ -266,8 +306,32 @@ export function createBroker(opts: BrokerOptions): Broker {
   ): Record<string, string[]> {
     const wl = whitelists.for(sessionID)
     const out: Record<string, string[]> = {}
-    for (const [tool, patterns] of (wl as unknown as { rules: Map<string, Set<string>> }).rules) {
+    for (const [tool, patterns] of wl.getRules()) {
       out[tool] = [...patterns]
+    }
+    return out
+  }
+
+  function getPendingSnapshot(): Array<{
+    requestId: string
+    sessionID: string
+    tool: string
+    ageMs: number
+  }> {
+    const now = Date.now()
+    const out: Array<{
+      requestId: string
+      sessionID: string
+      tool: string
+      ageMs: number
+    }> = []
+    for (const [requestId, p] of store.list()) {
+      out.push({
+        requestId,
+        sessionID: p.permission.sessionID,
+        tool: p.permission.type,
+        ageMs: now - p.createdAt,
+      })
     }
     return out
   }
@@ -391,6 +455,13 @@ export function createBroker(opts: BrokerOptions): Broker {
           sendJson(res, 200, { ok: true })
         },
       },
+      {
+        method: "GET",
+        match: (url) => url.pathname === "/v1/pending",
+        handle: async (_req, res) => {
+          sendJson(res, 200, { pending: getPendingSnapshot() })
+        },
+      },
     ]
   }
 
@@ -402,10 +473,14 @@ export function createBroker(opts: BrokerOptions): Broker {
   })
 
   async function start(): Promise<{ port: number; baseUrl: string }> {
+    loadPersistedWhitelists()
     await server.listen()
     log("info", "decision server listening", {
       port: server.port(),
       callback: server.baseUrl(),
+    })
+    log("info", "decision server loopback", {
+      bind: `127.0.0.1:${cfg.callbackPort}`,
     })
     if (cfg.hmacSecretGenerated) {
       log(
@@ -428,11 +503,9 @@ export function createBroker(opts: BrokerOptions): Broker {
     stop,
     ask,
     waitForDecision,
-    matches,
     addWhitelist,
+    getPendingSnapshot,
     forgetSession,
-    whitelistSize: () => whitelists.totalSize(),
-    whitelistSessionCount: () => whitelists.sessionCount(),
     port: () => server.port(),
     baseUrl: () => server.baseUrl(),
     reviewUrl: (requestId, token) => server.reviewUrl(requestId, token),
@@ -452,6 +525,9 @@ export const _internal = {
       sessionID: input.sessionID,
       messageID: "",
       createdAt: Date.now(),
+      diff: input.diff,
+      filediff: input.filediff,
+      modelExplanation: input.modelExplanation,
     }) as PermissionSnapshot,
   renderReviewPage,
 }

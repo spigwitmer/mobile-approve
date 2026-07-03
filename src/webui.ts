@@ -18,15 +18,79 @@ function formatPattern(pattern: string | string[] | undefined): string {
   return Array.isArray(pattern) ? pattern.join(" | ") : pattern
 }
 
-function formatMetadata(meta: Record<string, unknown> | undefined): string {
+function formatMetadata(
+  meta: Record<string, unknown> | undefined,
+  suppressedKeys: ReadonlySet<string> = new Set()
+): string {
   if (!meta || Object.keys(meta).length === 0) return ""
   const lines: string[] = []
   for (const [k, v] of Object.entries(meta)) {
+    if (suppressedKeys.has(k)) continue
     const value = typeof v === "string" ? v : JSON.stringify(v)
     if (value.length > 1024) continue
     lines.push(`${escapeHtml(k)}: ${escapeHtml(value)}`)
   }
   return lines.join("\n")
+}
+
+// Render a single unified diff. Lines starting with "+" (not "+++") get
+// class="add", "-" (not "---") get class="del", "@@" lines get class="hunk",
+// everything else gets class="ctx". We escape each line individually so the
+// spans are well-formed even if a diff line happens to contain HTML.
+function renderDiff(diff: string): string {
+  const lines = diff.split("\n")
+  const out: string[] = []
+  for (const raw of lines) {
+    const escaped = escapeHtml(raw)
+    if (raw.startsWith("@@")) {
+      out.push(`<span class="hunk">${escaped}</span>`)
+    } else if (raw.startsWith("+++") || raw.startsWith("---")) {
+      // file headers — colour as context, no special class
+      out.push(`<span class="ctx">${escaped}</span>`)
+    } else if (raw.startsWith("+")) {
+      out.push(`<span class="add">${escaped}</span>`)
+    } else if (raw.startsWith("-")) {
+      out.push(`<span class="del">${escaped}</span>`)
+    } else {
+      out.push(`<span class="ctx">${escaped}</span>`)
+    }
+  }
+  return out.join("\n")
+}
+
+// Count added / removed lines in a unified diff body (ignoring the diff
+// header `---` / `+++` and the `@@ … @@` hunk headers).
+function diffStats(diff: string): { adds: number; dels: number } {
+  let adds = 0
+  let dels = 0
+  for (const raw of diff.split("\n")) {
+    if (raw.startsWith("+++") || raw.startsWith("---")) continue
+    if (raw.startsWith("@@")) continue
+    if (raw.startsWith("+")) adds++
+    else if (raw.startsWith("-")) dels++
+  }
+  return { adds, dels }
+}
+
+function renderFileDiff(
+  files: Array<{ filename: string; diff: string }>
+): string {
+  return files
+    .map((f) => {
+      const { adds, dels } = diffStats(f.diff)
+      const body = renderDiff(f.diff)
+      return (
+        `<details class="filediff">` +
+        `<summary>${escapeHtml(f.filename)} (+${adds} -${dels})</summary>` +
+        `<pre class="diff">${body}</pre>` +
+        `</details>`
+      )
+    })
+    .join("")
+}
+
+function renderWhy(text: string): string {
+  return `<blockquote class="why"><strong>Why:</strong> ${escapeHtml(text)}</blockquote>`
 }
 
 export function renderReviewPage(input: {
@@ -43,8 +107,36 @@ export function renderReviewPage(input: {
     : permission.pattern
       ? [permission.pattern]
       : []
-  const metadata = formatMetadata(permission.metadata)
+  // If the same key appears at the top level (diff / filediff /
+  // modelExplanation), don't echo it again in the metadata block.
+  const suppressedMetadataKeys = new Set<string>()
+  if (permission.diff && typeof permission.diff === "string") {
+    suppressedMetadataKeys.add("diff")
+  }
+  if (Array.isArray(permission.filediff) && permission.filediff.length > 0) {
+    suppressedMetadataKeys.add("filediff")
+  }
+  if (
+    permission.modelExplanation &&
+    typeof permission.modelExplanation === "string"
+  ) {
+    suppressedMetadataKeys.add("modelExplanation")
+    suppressedMetadataKeys.add("model_explanation")
+  }
+  const metadata = formatMetadata(permission.metadata, suppressedMetadataKeys)
   const expired = Date.now() > expiresAtMs
+  const whyHtml =
+    permission.modelExplanation && permission.modelExplanation.length > 0
+      ? renderWhy(permission.modelExplanation)
+      : ""
+  const diffHtml =
+    permission.diff && permission.diff.length > 0
+      ? `<div class="label" style="margin-top:8px">diff</div><pre class="diff">${renderDiff(permission.diff)}</pre>`
+      : ""
+  const filediffHtml =
+    Array.isArray(permission.filediff) && permission.filediff.length > 0
+      ? `<div class="label" style="margin-top:8px">files changed</div>${renderFileDiff(permission.filediff)}`
+      : ""
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -121,11 +213,35 @@ export function renderReviewPage(input: {
   }
   details > summary::-webkit-details-marker { display: none; }
   details[open] > summary { margin-bottom: 8px; }
+  .why {
+    margin: 0 0 12px;
+    padding: 8px 12px;
+    border-left: 3px solid #2563eb;
+    background: #11121a;
+    border-radius: 6px;
+    color: #c7c9d1;
+    font-size: 13px;
+  }
+  .diff { white-space: pre; word-break: normal; }
+  .diff .add { color: #7ee787; }
+  .diff .del { color: #f87171; text-decoration: line-through; }
+  .diff .hunk { color: #9aa0a6; background: #11121a; display: inline-block; width: 100%; }
+  .diff .ctx { color: #c7c9d1; }
+  details.filediff > summary {
+    cursor: pointer;
+    color: #9aa0a6;
+    font-size: 13px;
+    list-style: none;
+    padding: 4px 0;
+  }
+  details.filediff > summary::-webkit-details-marker { display: none; }
+  details.filediff[open] > summary { margin-bottom: 6px; }
 </style>
 </head>
 <body>
 <h1>opencode wants to act</h1>
 <div class="sub">${title}</div>
+${whyHtml}
 
 <div class="panel">
   <div class="label">tool</div>
@@ -142,6 +258,8 @@ export function renderReviewPage(input: {
       ? `<div class="label" style="margin-top:8px">metadata</div><pre>${metadata}</pre>`
       : ""
   }
+  ${diffHtml}
+  ${filediffHtml}
 </div>
 
 <div class="panel stack">

@@ -1,5 +1,17 @@
 import { createHmac, randomUUID } from "node:crypto"
+import {
+  existsSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  fsyncSync,
+  writeFileSync,
+  closeSync,
+} from "node:fs"
+import { dirname, join } from "node:path"
 import type { Pending, Decision } from "./types.js"
+
+export type WhitelistFile = Record<string, Record<string, string[]>>
 
 function hmac(secret: string, message: string): string {
   return createHmac("sha256", secret).update(message).digest("base64url")
@@ -36,6 +48,14 @@ export class Whitelist {
     for (const s of this.rules.values()) n += s.size
     return n
   }
+
+  getRules(): ReadonlyMap<string, ReadonlySet<string>> {
+    return this.rules
+  }
+
+  *entriesForExport(): IterableIterator<[string, Set<string>]> {
+    yield* this.rules.entries()
+  }
 }
 
 export class SessionWhitelists {
@@ -54,6 +74,32 @@ export class SessionWhitelists {
     this.bySession.delete(sessionID)
   }
 
+  snapshotAll(): WhitelistFile {
+    const out: WhitelistFile = {}
+    for (const [sessionID, wl] of this.bySession) {
+      const tools: Record<string, string[]> = {}
+      for (const [tool, patterns] of wl.entriesForExport()) {
+        tools[tool] = [...patterns]
+      }
+      out[sessionID] = tools
+    }
+    return out
+  }
+
+  loadSnapshot(data: WhitelistFile): void {
+    if (!data || typeof data !== "object") return
+    for (const [sessionID, tools] of Object.entries(data)) {
+      if (!tools || typeof tools !== "object") continue
+      for (const [tool, patterns] of Object.entries(tools)) {
+        if (!Array.isArray(patterns)) continue
+        for (const pattern of patterns) {
+          if (typeof pattern !== "string") continue
+          this.for(sessionID).add(tool, pattern)
+        }
+      }
+    }
+  }
+
   totalSize(): number {
     let n = 0
     for (const wl of this.bySession.values()) n += wl.size()
@@ -63,6 +109,83 @@ export class SessionWhitelists {
   sessionCount(): number {
     return this.bySession.size
   }
+}
+
+export class WhitelistPersistence {
+  private readonly filePath: string
+  private readonly onError?: (err: Error) => void
+
+  constructor(filePath: string, onError?: (err: Error) => void) {
+    this.filePath = filePath
+    this.onError = onError
+  }
+
+  load(): WhitelistFile {
+    let raw: string
+    try {
+      raw = readFileSync(this.filePath, "utf8")
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") return {}
+      this.report(err, "read")
+      return {}
+    }
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(raw)
+    } catch (err) {
+      this.report(err, "parse")
+      return {}
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      this.report(new Error("whitelist file is not a JSON object"), "parse")
+      return {}
+    }
+    return parsed as WhitelistFile
+  }
+
+  save(data: WhitelistFile): void {
+    const json = JSON.stringify(data)
+    const tmp = `${this.filePath}.tmp`
+    try {
+      const dir = dirname(this.filePath)
+      if (!existsSync(dir)) {
+        this.report(new Error(`parent directory does not exist: ${dir}`), "write")
+        return
+      }
+      const fd = openSync(tmp, "w", 0o600)
+      try {
+        writeFileSync(fd, json)
+        try {
+          fsyncSync(fd)
+        } catch (err) {
+          this.report(err, "fsync")
+        }
+      } finally {
+        closeSync(fd)
+      }
+      renameSync(tmp, this.filePath)
+    } catch (err) {
+      this.report(err, "rename")
+    }
+  }
+
+  getPath(): string {
+    return this.filePath
+  }
+
+  private report(err: unknown, op: string): void {
+    const reason = err instanceof Error ? err.message : String(err)
+    if (this.onError) {
+      this.onError(new Error(`whitelist persistence ${op} failed: ${reason}`))
+    }
+  }
+}
+
+export function defaultWhitelistPath(): string {
+  const base =
+    process.env.XDG_CONFIG_HOME ??
+    join(process.env.HOME ?? "~", ".config")
+  return join(base, "mobile-approve", "whitelist.json")
 }
 
 function matchWildcard(pattern: string, candidate: string): boolean {
@@ -138,6 +261,17 @@ export class NonceStore {
 
   has(id: string): boolean {
     return this.entries.has(id)
+  }
+
+  list(): Array<[string, Pending]> {
+    const now = Date.now()
+    const out: Array<[string, Pending]> = []
+    for (const [id, p] of this.entries) {
+      if (now - p.createdAt <= this.ttlMs) {
+        out.push([id, p])
+      }
+    }
+    return out
   }
 
   private gc(): void {

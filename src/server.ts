@@ -1,7 +1,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http"
 import type { AddressInfo } from "node:net"
-import { isDecision, NonceStore } from "./security.js"
-import type { Decision, PermissionSnapshot } from "./types.js"
+import { isDecision, NonceStore, signToken, verifyToken } from "./security.js"
+import type { Decision, PermissionSnapshot, Pending } from "./types.js"
 import { renderReviewPage } from "./webui.js"
 
 export type DecisionServer = {
@@ -9,7 +9,7 @@ export type DecisionServer = {
   reviewUrl: (requestId: string, token: string) => string
   listen: () => Promise<{ port: number }>
   stop: () => Promise<void>
-  register: (requestId: string, snapshot: PermissionSnapshot) => void
+  register: (requestId: string, snapshot: PermissionSnapshot, hmacSecret: string) => void
   waitForDecision: (requestId: string, timeoutMs: number) => Promise<Decision>
   baseUrl: () => string
   port: () => number
@@ -103,11 +103,11 @@ export function createDecisionServer(deps: ServerDeps): DecisionServer {
           sendJson(res, 410, { ok: false, error: "unknown or expired nonce" })
           return
         }
-        if (!verifyStoredToken(pending, t)) {
+        if (!verifyStoredToken(pending, requestId, t)) {
           sendJson(res, 401, { ok: false, error: "invalid token" })
           return
         }
-        const callbackUrl = `${baseUrl()}/decide/${requestId}`
+        const callbackUrl = `${baseUrl()}/decide/${requestId}?t=${signToken(pending.hmacSecret, requestId)}`
         const html = renderReviewPage({
           requestId,
           callbackUrl,
@@ -120,6 +120,20 @@ export function createDecisionServer(deps: ServerDeps): DecisionServer {
       if (requestId && req.method === "POST") {
         if (requestId.length > 256) {
           sendJson(res, 400, { ok: false, error: "bad requestId" })
+          return
+        }
+        const t = url.searchParams.get("t")
+        if (!t) {
+          sendJson(res, 401, { ok: false, error: "missing token" })
+          return
+        }
+        const pending = store.peek(requestId)
+        if (!pending) {
+          sendJson(res, 410, { ok: false, error: "unknown or expired nonce" })
+          return
+        }
+        if (!verifyStoredToken(pending, requestId, t)) {
+          sendJson(res, 401, { ok: false, error: "invalid token" })
           return
         }
         const raw = await readBody(req)
@@ -138,12 +152,12 @@ export function createDecisionServer(deps: ServerDeps): DecisionServer {
           sendJson(res, 400, { ok: false, error: "requestId mismatch" })
           return
         }
-        const pending = store.consume(requestId)
-        if (!pending) {
+        const consumed = store.consume(requestId)
+        if (!consumed) {
           sendJson(res, 410, { ok: false, error: "unknown or expired nonce" })
           return
         }
-        pending.resolve(parsed)
+        consumed.resolve(parsed)
         sendJson(res, 200, { ok: true })
         return
       }
@@ -185,12 +199,17 @@ export function createDecisionServer(deps: ServerDeps): DecisionServer {
   const reviewUrl = (requestId: string, token: string) =>
     `${baseUrl()}/review/${requestId}?t=${token}`
 
-  const register = (requestId: string, snapshot: PermissionSnapshot): void => {
+  const register = (
+    requestId: string,
+    snapshot: PermissionSnapshot,
+    hmacSecret: string
+  ): void => {
     store.register(requestId, {
       resolve: () => {},
       reject: () => {},
       createdAt: Date.now(),
       permission: snapshot,
+      hmacSecret,
     })
   }
 
@@ -223,6 +242,7 @@ export function createDecisionServer(deps: ServerDeps): DecisionServer {
         },
         createdAt: existing.createdAt,
         permission: existing.permission,
+        hmacSecret: existing.hmacSecret,
       })
     })
 
@@ -239,15 +259,14 @@ export function createDecisionServer(deps: ServerDeps): DecisionServer {
 }
 
 function verifyStoredToken(
-  pending: { createdAt: number },
+  pending: Pending,
+  requestId: string,
   token: string
 ): boolean {
-  // Token is opaque to us — it was signed at registration time and is included
-  // in the URL we generated for the user. We accept it as-is here because the
-  // URL itself is the capability; TLS over the tunnel + the nonce lifecycle
-  // are the trust boundary.
-  void pending
-  return typeof token === "string" && token.length > 0 && token.length <= 512
+  if (typeof token !== "string" || token.length === 0 || token.length > 512) {
+    return false
+  }
+  return verifyToken(pending.hmacSecret, requestId, token)
 }
 
 // Extract the requestId from the pathname, accepting both prefixed

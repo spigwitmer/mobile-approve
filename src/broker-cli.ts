@@ -20,6 +20,7 @@
 //   MOBILE_APPROVE_NTFY_USER      ntfy user
 //   MOBILE_APPROVE_NTFY_PASSWORD  ntfy password
 //   MOBILE_APPROVE_OPENCODE_CONFIG  path to opencode.json (fallback)
+//   MOBILE_APPROVE_WHITELIST_PATH  override the whitelist persistence file
 import { readFileSync } from "node:fs"
 import { createBroker } from "./broker.js"
 import { resolveConfig, type PluginOptions } from "./types.js"
@@ -111,6 +112,8 @@ function loadEnvOverrides(opts: PluginOptions): PluginOptions {
     logLevel: (env.MOBILE_APPROVE_LOG_LEVEL as PluginOptions["logLevel"]) ??
       opts.logLevel,
     hmacSecretEnv: "MOBILE_APPROVE_HMAC_SECRET",
+    whitelistPath:
+      env.MOBILE_APPROVE_WHITELIST_PATH ?? opts.whitelistPath,
   }
 }
 

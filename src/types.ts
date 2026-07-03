@@ -7,6 +7,7 @@ export type PluginOptions = {
   hmacSecretEnv?: string
   nonceTtlMs?: number
   phoneNotifications?: boolean
+  whitelistPath?: string
   ntfy?: {
     baseUrl: string
     topic: string
@@ -28,12 +29,13 @@ export type ResolvedConfig = {
   hmacSecretEnv: string
   nonceTtlMs: number
   phoneNotifications: boolean
+  whitelistPath?: string
   ntfy: PluginOptions["ntfy"]
   tunnel: PluginOptions["tunnel"]
   logLevel: "debug" | "info" | "warn" | "error"
 }
 
-export const DEFAULTS: Required<Omit<PluginOptions, "ntfy" | "tunnel">> = {
+export const DEFAULTS: Required<Omit<PluginOptions, "ntfy" | "tunnel" | "whitelistPath">> = {
   brokerBaseUrl: "",
   callbackPort: 7461,
   defaultTimeoutMs: 300_000,
@@ -76,6 +78,7 @@ export function resolveConfig(opts: PluginOptions = {}): ResolvedConfig {
     hmacSecretEnv: envName,
     nonceTtlMs: opts.nonceTtlMs ?? DEFAULTS.nonceTtlMs,
     phoneNotifications: opts.phoneNotifications ?? DEFAULTS.phoneNotifications,
+    whitelistPath: opts.whitelistPath,
     ntfy: opts.ntfy,
     tunnel: opts.tunnel,
     logLevel: opts.logLevel ?? DEFAULTS.logLevel,
@@ -92,6 +95,11 @@ export type Decision = {
   receivedAt: number
 }
 
+export type FileDiffEntry = {
+  filename: string
+  diff: string
+}
+
 export type PermissionSnapshot = {
   id: string
   type: string
@@ -102,6 +110,9 @@ export type PermissionSnapshot = {
   messageID: string
   callID?: string
   createdAt: number
+  diff?: string
+  filediff?: FileDiffEntry[]
+  modelExplanation?: string
 }
 
 export type Pending = {
@@ -109,6 +120,7 @@ export type Pending = {
   reject: (e: Error) => void
   createdAt: number
   permission: PermissionSnapshot
+  hmacSecret: string
 }
 
 export type PublishInput = {

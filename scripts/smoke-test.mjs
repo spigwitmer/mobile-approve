@@ -29,7 +29,7 @@ const snapshot = {
   callID: "call-1",
   createdAt: Date.now(),
 }
-server.register(requestId, snapshot)
+server.register(requestId, snapshot, "test-secret")
 const decisionPromise = server.waitForDecision(requestId, 10_000)
 
 // 1) GET /<id>?t=<token> renders the simplified UI.
@@ -48,7 +48,7 @@ console.log("hidden textarea id:", html.includes("id=\"command\"") && html.inclu
 const requestIdArr = crypto.randomUUID()
 const tokArr = signToken("test-secret", requestIdArr)
 const snapArr = { ...snapshot, id: requestIdArr, pattern: ["rm *", "rm -rf *"] }
-server.register(requestIdArr, snapArr)
+server.register(requestIdArr, snapArr, "test-secret")
 const dpArr = server.waitForDecision(requestIdArr, 10_000)
 const htmlArrRes = await fetch(`${publicBaseUrl}/${requestIdArr}?t=${tokArr}`)
 const htmlArr = await htmlArrRes.text()
@@ -58,12 +58,12 @@ console.log("  contains radio rm -rf *:", htmlArr.includes('value="rm -rf *"'))
 console.log("  contains __custom__ radio:", htmlArr.includes('value="__custom__"'))
 console.log("  contains name=always:", htmlArr.includes('name="always"'))
 // Cleanup
-await postDecision(requestIdArr, { status: "deny", scope: "once" })
+await postDecision(requestIdArr, tokArr, { status: "deny", scope: "once" })
 await dpArr
 
 // 2) Test the TUI-mirror decisions
-async function postDecision(reqId, body) {
-  const res = await fetch(`${publicBaseUrl}/${reqId}`, {
+async function postDecision(reqId, token, body) {
+  const res = await fetch(`${publicBaseUrl}/${reqId}?t=${token}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ requestId: reqId, receivedAt: Date.now(), ...body }),
@@ -77,7 +77,7 @@ async function postDecision(reqId, body) {
 }
 
 // Scenario A: Allow once
-await postDecision(requestId, { status: "allow", scope: "once" })
+await postDecision(requestId, token, { status: "allow", scope: "once" })
 const v1 = await decisionPromise
 console.log("scenario A:", v1.status, v1.scope)
 
@@ -85,9 +85,9 @@ console.log("scenario A:", v1.status, v1.scope)
 const requestIdB = crypto.randomUUID()
 const tokB = signToken("test-secret", requestIdB)
 const snapB = { ...snapshot, id: requestIdB }
-server.register(requestIdB, snapB)
+server.register(requestIdB, snapB, "test-secret")
 const dpB = server.waitForDecision(requestIdB, 10_000)
-await postDecision(requestIdB, {
+await postDecision(requestIdB, tokB, {
   status: "allow",
   scope: "always",
   patterns: ["git status"],
@@ -120,9 +120,9 @@ console.log("sess-B still present (touched):", wlB_size_after === 0 && sessionsA
 const requestIdC = crypto.randomUUID()
 const tokC = signToken("test-secret", requestIdC)
 const snapC = { ...snapshot, id: requestIdC }
-server.register(requestIdC, snapC)
+server.register(requestIdC, snapC, "test-secret")
 const dpC = server.waitForDecision(requestIdC, 10_000)
-await postDecision(requestIdC, { status: "deny", scope: "once" })
+await postDecision(requestIdC, tokC, { status: "deny", scope: "once" })
 const v3 = await dpC
 console.log("scenario C:", v3.status, v3.scope)
 
@@ -137,12 +137,6 @@ console.log("replay status:", replayRes.status)
 // 4) GET /review after consume returns 410
 const html2 = await fetch(`${publicBaseUrl}/${requestId}?t=${token}`)
 console.log("review after consume:", html2.status)
-
-await server.stop()
-
-// 5) isDecision validation
-console.log("isDecision valid:", isDecision({ requestId: "x", status: "allow", scope: "once", receivedAt: 1 }))
-console.log("isDecision bad command:", !isDecision({ requestId: "x", status: "allow", scope: "once", receivedAt: 1, command: 123 }))
 
 const checks = [
   ["review renders", htmlRes.status === 200],
@@ -160,8 +154,88 @@ const checks = [
   ["whitelist cleanup on session delete", sessionsBefore === 2 && sessionsAfter === 1 && totalAfter === 0],
   ["replay blocked", replayRes.status === 410],
   ["review gone after consume", html2.status === 410],
-  ["isDecision guards", isDecision({ requestId: "x", status: "allow", scope: "once", receivedAt: 1 }) && !isDecision({ requestId: "x", status: "allow", scope: "once", receivedAt: 1, command: 123 })],
 ]
+
+// --- T7: forged token rejected ---
+// Register a fresh pending ask with a known secret. The signed URL embeds
+// the real HMAC token. Subsequent requests must:
+//   - with a forged token: be rejected (401), and must NOT consume the nonce.
+//   - with the token removed: be rejected (401).
+//   - with the real token: succeed (200) and record the decision.
+{
+  const t7Secret = "t7-secret"
+  const t7Req = crypto.randomUUID()
+  const t7Token = signToken(t7Secret, t7Req)
+  const t7Snap = { ...snapshot, id: t7Req }
+  server.register(t7Req, t7Snap, t7Secret)
+  const t7DecisionPromise = server.waitForDecision(t7Req, 10_000)
+
+  // (a) GET with the real token renders the review page.
+  const t7RealGet = await fetch(`${publicBaseUrl}/${t7Req}?t=${t7Token}`)
+  console.log("T7 GET real token:", t7RealGet.status)
+  // The rendered callbackUrl must embed the signed token (not the raw
+  // requestId), so the phone's POST carries the HMAC.
+  const t7Html = await t7RealGet.text()
+  const t7CbMatch = t7Html.match(/const callbackUrl = "([^"]+)"/)
+  const t7CallbackUrl = t7CbMatch ? t7CbMatch[1] : ""
+  console.log("T7 callbackUrl has signed token:", t7CallbackUrl.includes(`?t=${t7Token}`))
+
+  // (b) GET with a forged token is rejected.
+  const t7ForgedGet = await fetch(`${publicBaseUrl}/${t7Req}?t=garbage`)
+  console.log("T7 GET forged token:", t7ForgedGet.status)
+
+  // (c) GET with the token removed is rejected.
+  const t7NoTokenGet = await fetch(`${publicBaseUrl}/${t7Req}`)
+  console.log("T7 GET no token:", t7NoTokenGet.status)
+
+  // (d) POST with a forged token is rejected AND the nonce is not consumed.
+  const t7ForgedPost = await fetch(`${publicBaseUrl}/${t7Req}?t=garbage`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ requestId: t7Req, receivedAt: Date.now(), status: "allow", scope: "once" }),
+  })
+  console.log("T7 POST forged token:", t7ForgedPost.status)
+
+  // (e) POST with no token is rejected.
+  const t7NoTokenPost = await fetch(`${publicBaseUrl}/${t7Req}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ requestId: t7Req, receivedAt: Date.now(), status: "allow", scope: "once" }),
+  })
+  console.log("T7 POST no token:", t7NoTokenPost.status)
+
+  // (f) After forged/no-token attempts, the pending entry must still be live:
+  // a POST with the REAL token still succeeds and records the decision.
+  const t7RealPost = await fetch(t7CallbackUrl, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ requestId: t7Req, receivedAt: Date.now(), status: "deny", scope: "once" }),
+  })
+  console.log("T7 POST real token after forgeries:", t7RealPost.status)
+  const t7Decision = await t7DecisionPromise
+  console.log("T7 decision after forgeries:", t7Decision.status, t7Decision.scope)
+
+  checks.push(
+    ["T7 GET real token returns 200", t7RealGet.status === 200],
+    ["T7 rendered callbackUrl carries signed token", t7CallbackUrl.includes(`?t=${t7Token}`)],
+    ["T7 GET forged token rejected (401)", t7ForgedGet.status === 401],
+    ["T7 GET no token rejected (401)", t7NoTokenGet.status === 401],
+    ["T7 POST forged token rejected (401)", t7ForgedPost.status === 401],
+    ["T7 POST no token rejected (401)", t7NoTokenPost.status === 401],
+    ["T7 nonce survives forgery attempts", t7RealPost.status === 200],
+    ["T7 real decision recorded after forgeries", t7Decision.status === "deny" && t7Decision.scope === "once"],
+  )
+}
+
+await server.stop()
+
+// 5) isDecision validation
+console.log("isDecision valid:", isDecision({ requestId: "x", status: "allow", scope: "once", receivedAt: 1 }))
+console.log("isDecision bad command:", !isDecision({ requestId: "x", status: "allow", scope: "once", receivedAt: 1, command: 123 }))
+
+checks.push(
+  ["isDecision guards", isDecision({ requestId: "x", status: "allow", scope: "once", receivedAt: 1 }) && !isDecision({ requestId: "x", status: "allow", scope: "once", receivedAt: 1, command: 123 })],
+)
 for (const [name, ok] of checks) console.log(ok ? "OK  " : "FAIL", name)
 console.log(checks.every(([, ok]) => ok) ? "ALL OK" : "SOME FAILED")
 process.exit(checks.every(([, ok]) => ok) ? 0 : 1)

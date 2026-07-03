@@ -740,6 +740,214 @@ async function askAndFetchReview(body) {
   )
 }
 
+// 13. auto-close script content
+//
+// Verifies that the rendered review page wires up an auto-close countdown
+// after a successful decision POST. The default is 3000ms; per-load override
+// is via ?closeAfter=N (N in seconds; 0 disables). The override is read by
+// the inline script from window.location.search — at server-render time the
+// HTML is identical regardless of the query string, so we can only assert
+// on the wiring (presence of closeAfterMs literal, the countdown function,
+// "Close now" UI, and the URLSearchParams parser), not on the runtime
+// multiplication. The DEFAULT case uses askAndFetchReview (no query); the
+// OVERRIDE case builds a /review/...?... path with ?closeAfter=10 appended.
+{
+  const { html, status } = await askAndFetchReview({
+    sessionID: "sess-autoclose",
+    permissionID: "perm-autoclose",
+    tool: "bash",
+    title: "auto-close default",
+    pattern: "echo autoclose",
+  })
+  check("auto-close default page returns 200", status === 200, { status })
+  check(
+    "default closeAfterMs literal (3000) appears in script",
+    /closeAfterMs\s*=\s*3000/.test(html),
+    { has3000: /closeAfterMs\s*=\s*3000/.test(html) }
+  )
+  check(
+    "countdown wiring present (setInterval)",
+    /setInterval\(/.test(html)
+  )
+  check(
+    "Close now button text referenced in script",
+    /Close now/.test(html)
+  )
+  check(
+    "window.close() call present in script",
+    /window\.close\(/.test(html)
+  )
+  check(
+    "URLSearchParams-based override parser present",
+    /URLSearchParams[\s\S]{0,200}\.get\(['"]closeAfter['"]\)/.test(html)
+  )
+
+  // Override: GET the same review page with ?closeAfter=10 appended.
+  const askRes2 = await fetch(`${baseUrl}/v1/ask`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      sessionID: "sess-autoclose-ovr",
+      permissionID: "perm-autoclose-ovr",
+      tool: "bash",
+      title: "auto-close override",
+      pattern: "echo autoclose-override",
+    }),
+  })
+  const ask2 = await askRes2.json()
+  const u2 = new URL(ask2.reviewUrl)
+  const sep = u2.search ? "&" : "?"
+  const overridePath =
+    u2.pathname.replace(/^\/review\//, "/") + u2.search + sep + "closeAfter=10"
+  const res2 = await fetch(`${baseUrl}${overridePath}`)
+  const html2 = await res2.text()
+  check(
+    "override ?closeAfter=10 page returns 200",
+    res2.ok,
+    { status: res2.status }
+  )
+  check(
+    "override URL path was built with closeAfter=10",
+    overridePath.includes("closeAfter=10"),
+    { overridePath }
+  )
+  check(
+    "override page still serializes default closeAfterMs=3000 (URL override is runtime only)",
+    /closeAfterMs\s*=\s*3000/.test(html2)
+  )
+  check(
+    "override page wires ?closeAfter param via URLSearchParams",
+    /URLSearchParams[\s\S]{0,200}\.get\(['"]closeAfter['"]\)/.test(html2)
+  )
+  check(
+    "override page multiplies seconds to ms (presence of * 1000)",
+    /closeAfterMs\s*=\s*sec\s*===\s*0\s*\?\s*0\s*:\s*Math\.round\(sec\s*\*\s*1000\)/.test(html2)
+  )
+}
+
+// 14. recall: ask + recall returns 200 recalled, second recall returns already-decided
+//
+// The /v1/recall/:requestId endpoint consumes the pending nonce so a
+// follow-up phone callback returns 410. A second /v1/recall call after
+// the consume must return already-decided.
+{
+  // Ask
+  const askRes = await fetch(`${baseUrl}/v1/ask`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      sessionID: "sess-recall",
+      permissionID: "perm-recall",
+      tool: "bash",
+      title: "recall test",
+      pattern: "echo recall",
+    }),
+  })
+  const ask = await askRes.json()
+  const requestId = ask.requestId
+  check(
+    "14: /v1/ask returned a requestId",
+    typeof requestId === "string" && requestId.length > 0,
+    { requestId }
+  )
+
+  // First recall: pending was just registered, should report "recalled"
+  const r1 = await fetch(`${baseUrl}/v1/recall/${requestId}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ status: "allow", scope: "once" }),
+  })
+  const r1Body = await r1.json().catch(() => null)
+  check(
+    "14: first recall returns 200 with status=recalled",
+    r1.ok && r1Body && r1Body.ok === true && r1Body.status === "recalled",
+    { status: r1.status, body: r1Body }
+  )
+
+  // Second recall: pending was consumed, should report "already-decided"
+  const r2 = await fetch(`${baseUrl}/v1/recall/${requestId}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ status: "deny", scope: "once" }),
+  })
+  const r2Body = await r2.json().catch(() => null)
+  check(
+    "14: second recall returns 200 with status=already-decided",
+    r2.ok && r2Body && r2Body.ok === true && r2Body.status === "already-decided",
+    { status: r2.status, body: r2Body }
+  )
+
+  // Verify GET /v1/pending no longer lists the requestId.
+  const pendingRes = await fetch(`${baseUrl}/v1/pending`)
+  const pendingBody = await pendingRes.json()
+  check(
+    "14: /v1/pending no longer lists the recalled requestId",
+    !pendingBody.pending.some((p) => p.requestId === requestId),
+    { pending: pendingBody.pending.map((p) => p.requestId) }
+  )
+
+  // And verify a follow-up phone callback returns 410 (nonce consumed).
+  const callbackUrl = new URL(ask.callbackUrl)
+  const callbackPath =
+    callbackUrl.pathname.replace(/^\/decide\//, "/") + callbackUrl.search
+  const cbRes = await fetch(`${baseUrl}${callbackPath}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      requestId,
+      receivedAt: Date.now(),
+      status: "allow",
+      scope: "once",
+    }),
+  })
+  check(
+    "14: phone callback after recall returns 410 (nonce consumed)",
+    cbRes.status === 410,
+    { status: cbRes.status }
+  )
+}
+
+// 15. recall: ask + phone-decide + recall returns already-decided
+//
+// When the phone beats the TUI to the punch, the nonce is consumed by
+// the decide path; a later /v1/recall must report already-decided.
+{
+  // Ask
+  const askRes = await fetch(`${baseUrl}/v1/ask`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      sessionID: "sess-recall-2",
+      permissionID: "perm-recall-2",
+      tool: "bash",
+      title: "recall after phone-decide",
+      pattern: "echo r2",
+    }),
+  })
+  const ask = await askRes.json()
+
+  // Phone decides first via the Tailscale-stripped /<id>?t=<token> path
+  const decideRes = await decide(ask)
+  check(
+    "15: phone decide before recall returns 200",
+    decideRes.status === 200,
+    { status: decideRes.status }
+  )
+
+  // Now recall — must be already-decided
+  const r = await fetch(`${baseUrl}/v1/recall/${ask.requestId}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ status: "deny", scope: "once" }),
+  })
+  const rBody = await r.json().catch(() => null)
+  check(
+    "15: recall after phone-decide returns 200 with status=already-decided",
+    r.ok && rBody && rBody.ok === true && rBody.status === "already-decided",
+    { status: r.status, body: rBody }
+  )
+}
+
 await broker.stop()
 
 // Persistence scenario has been moved to scripts/persistence-test.mjs

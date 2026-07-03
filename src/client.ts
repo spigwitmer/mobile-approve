@@ -87,6 +87,23 @@ export class BrokerClient {
     return (await res.json()) as Decision
   }
 
+  async recall(
+    requestId: string,
+    decision?: { status: "allow" | "deny"; scope?: "once" | "always" }
+  ): Promise<{ ok: true; status: string }> {
+    const url = `${this.baseUrl}/v1/recall/${encodeURIComponent(requestId)}`
+    const res = await this.fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(decision ?? {}),
+    })
+    if (!res.ok) {
+      const text = await res.text().catch(() => "")
+      throw new Error(`recall failed: ${res.status} ${text}`.trim())
+    }
+    return (await res.json()) as { ok: true; status: string }
+  }
+
   async addWhitelist(
     sessionID: string,
     tool: string,

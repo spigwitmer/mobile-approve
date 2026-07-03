@@ -1,5 +1,5 @@
 import { createDecisionServer, type ExtraRoute } from "./server.js"
-import { publishAsk } from "./ntfy.js"
+import { publishAsk, deleteAsk } from "./ntfy.js"
 import { renderReviewPage } from "./webui.js" // used by _internal re-export
 import {
   defaultWhitelistPath,
@@ -50,6 +50,11 @@ export interface Broker {
     requestId: string,
     timeoutMs: number
   ): Promise<Decision>
+
+  recall(
+    requestId: string,
+    decision?: { status: "allow" | "deny"; scope?: "once" | "always" }
+  ): Promise<{ ok: true; status: string }>
 
   addWhitelist(sessionID: string, tool: string, pattern: string): void
   forgetSession(sessionID: string): void
@@ -218,8 +223,9 @@ export function createBroker(opts: BrokerOptions): Broker {
     })
 
     if (cfg.ntfy) {
+      let messageId: string | null = null
       try {
-        await publishAsk({
+        messageId = await publishAsk({
           baseUrl: cfg.ntfy.baseUrl,
           topic: cfg.ntfy.topic,
           user: cfg.ntfy.user,
@@ -229,13 +235,20 @@ export function createBroker(opts: BrokerOptions): Broker {
           reviewUrl,
           ...buildNotification(snapshot, reviewUrl),
         })
-        log("info", "ntfy notification published", { requestId })
+        log("info", "ntfy notification published", { requestId, messageId })
       } catch (err) {
         const reason = err instanceof Error ? err.message : String(err)
         log("error", "ntfy publish failed; callback-only fallback", {
           requestId,
           reason,
         })
+      }
+      // Re-register with the ntfy messageId so a later broker.recall()
+      // can DELETE the published ntfy message. The placeholder entry is
+      // overwritten; waitForDecision() will further re-register with the
+      // real resolve/reject and carry the messageId forward.
+      if (messageId) {
+        server.register(requestId, snapshot, cfg.hmacSecret, messageId)
       }
     } else {
       log("warn", "ntfy not configured; callback-only fallback", { requestId })
@@ -249,6 +262,48 @@ export function createBroker(opts: BrokerOptions): Broker {
     timeoutMs: number
   ): Promise<Decision> {
     return server!.waitForDecision(requestId, timeoutMs)
+  }
+
+  async function recall(
+    requestId: string,
+    decision?: { status: "allow" | "deny"; scope?: "once" | "always" }
+  ): Promise<{ ok: true; status: string }> {
+    if (!store.peek(requestId)) {
+      return { ok: true, status: "already-decided" }
+    }
+    const consumed = store.consume(requestId)
+    if (!consumed) {
+      return { ok: true, status: "already-decided" }
+    }
+    const finalDecision: Decision = {
+      requestId,
+      status: decision?.status ?? "deny",
+      scope: decision?.scope ?? "once",
+      receivedAt: Date.now(),
+    }
+    consumed.resolve(finalDecision)
+    if (cfg.ntfy && consumed.messageId) {
+      try {
+        await deleteAsk({
+          baseUrl: cfg.ntfy.baseUrl,
+          topic: cfg.ntfy.topic,
+          user: cfg.ntfy.user,
+          password: cfg.ntfy.password,
+          messageId: consumed.messageId,
+        })
+        log("info", "ntfy message recalled", {
+          requestId,
+          messageId: consumed.messageId,
+        })
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : String(err)
+        log("warn", "ntfy delete failed; broker-side consume succeeded", {
+          requestId,
+          reason,
+        })
+      }
+    }
+    return { ok: true, status: "recalled" }
   }
 
   function addWhitelist(
@@ -414,6 +469,43 @@ export function createBroker(opts: BrokerOptions): Broker {
       },
       {
         method: "POST",
+        match: (url) => /^\/v1\/recall\/[^/]+$/.test(url.pathname),
+        handle: async (_req, res, url) => {
+          const requestId = decodeURIComponent(
+            url.pathname.replace(/^\/v1\/recall\//, "")
+          )
+          let body: {
+            value: { status?: string; scope?: string } | null
+          } = { value: null }
+          try {
+            const parsed = await readJsonBody(_req)
+            if (parsed.ok)
+              body = {
+                value: parsed.value as { status?: string; scope?: string } | null,
+              }
+          } catch {
+            /* ignore */
+          }
+          const decision =
+            body.value && typeof body.value === "object"
+              ? {
+                  status: (body.value.status === "allow"
+                    ? "allow"
+                    : "deny") as "allow" | "deny",
+                  scope: "once" as "once" | "always",
+                }
+              : undefined
+          try {
+            const result = await recall(requestId, decision)
+            sendJson(res, 200, result)
+          } catch (err) {
+            const reason = err instanceof Error ? err.message : String(err)
+            sendJson(res, 500, { ok: false, error: reason })
+          }
+        },
+      },
+      {
+        method: "POST",
         match: (url) => url.pathname === "/v1/whitelist",
         handle: async (req, res) => {
           const body = await readJsonBody(req)
@@ -503,6 +595,7 @@ export function createBroker(opts: BrokerOptions): Broker {
     stop,
     ask,
     waitForDecision,
+    recall,
     addWhitelist,
     getPendingSnapshot,
     forgetSession,

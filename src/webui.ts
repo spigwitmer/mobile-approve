@@ -104,8 +104,10 @@ export function renderReviewPage(input: {
   callbackUrl: string
   expiresAtMs: number
   permission: PermissionSnapshot
+  closeAfterMs?: number
 }): string {
   const { requestId, callbackUrl, expiresAtMs, permission } = input
+  const closeAfterMs = input.closeAfterMs ?? 3000
   const title = escapeHtml(permission.title || permission.type || "permission")
   const pattern = formatPattern(permission.pattern)
   const patternArray = Array.isArray(permission.pattern)
@@ -350,6 +352,76 @@ export function renderReviewPage(input: {
   const expiresAtMs = ${JSON.stringify(expiresAtMs)};
   const $status = document.getElementById('status');
 
+  // Default auto-close delay (ms) after a successful decision POST. The
+  // user can override per-load via ?closeAfter=N (N in seconds; 0 disables
+  // the countdown entirely). Server-rendered as a literal so the test
+  // suite can assert on the default.
+  let closeAfterMs = ${JSON.stringify(closeAfterMs)};
+  // Per-load URL override (N is seconds; e.g. ?closeAfter=10 → 10000ms).
+  try {
+    const params = new URLSearchParams(window.location.search);
+    const raw = params.get('closeAfter');
+    if (raw !== null) {
+      const sec = Number(raw);
+      if (Number.isFinite(sec) && sec >= 0) {
+        closeAfterMs = sec === 0 ? 0 : Math.round(sec * 1000);
+      }
+    }
+  } catch (e) { /* keep default */ }
+
+  let closeTimer = null;
+  function tryClose() {
+    if (closeTimer !== null) {
+      clearInterval(closeTimer);
+      closeTimer = null;
+    }
+    // Best-effort: mobile browsers often block window.close() for tabs
+    // the user opened directly. If the call is ignored, the "Close now"
+    // button is replaced by a "Decision sent" message and the user
+    // dismisses the tab manually.
+    try { window.close(); } catch (e) { /* ignored */ }
+  }
+  function startCloseCountdown() {
+    if (closeAfterMs <= 0) {
+      $status.textContent = 'Decision sent. You can close this page.';
+      $status.className = 'status';
+      return;
+    }
+    let remainingMs = closeAfterMs;
+    $status.innerHTML = '';
+    const text = document.createElement('span');
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.textContent = 'Close now';
+    button.style.minHeight = 'auto';
+    button.style.padding = '4px 10px';
+    button.style.marginLeft = '8px';
+    button.style.width = 'auto';
+    button.addEventListener('click', () => tryClose());
+    function tick() {
+      const s = Math.max(0, Math.ceil(remainingMs / 1000));
+      text.textContent = 'Decision sent — closing in ' + s + 's';
+      if (remainingMs <= 1000) {
+        tryClose();
+        return;
+      }
+      remainingMs -= 1000;
+    }
+    tick();
+    $status.appendChild(text);
+    $status.appendChild(button);
+    $status.className = 'status';
+    closeTimer = setInterval(tick, 1000);
+    if (typeof window.addEventListener === 'function') {
+      window.addEventListener('pagehide', () => {
+        if (closeTimer !== null) {
+          clearInterval(closeTimer);
+          closeTimer = null;
+        }
+      });
+    }
+  }
+
   function checkExpiry() {
     if (Date.now() > expiresAtMs) {
       $status.textContent = 'Expired — the plugin fell back to default-deny.';
@@ -381,8 +453,7 @@ export function renderReviewPage(input: {
         $status.className = 'status expired';
         return;
       }
-      $status.textContent = 'Decision sent. You can close this page.';
-      $status.className = 'status';
+      startCloseCountdown();
     } catch (e) {
       $status.textContent = 'Network error: ' + (e && e.message ? e.message : String(e));
       $status.className = 'status expired';

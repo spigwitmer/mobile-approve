@@ -729,6 +729,128 @@ function check(name, ok, info) {
   await hooks3.dispose()
 }
 
+// --- Scenario 8 (WS12): permission.replied triggers broker.recall ---
+//
+// The plugin's permission.replied event hook must call broker.recall()
+// for any pending ask it owns, which (a) consumes the nonce on the
+// broker and (b) leaves the ntfy side alone when ntfy isn't configured
+// (which is our test broker's situation). The plugin's own
+// waitForDecision then resolves with the synthetic decision, which
+// triggers a replyToOpencode call. We assert:
+//   - GET /v1/pending no longer lists the requestId (consume happened)
+//   - the plugin sent a reply back to opencode with the right shape
+//     ("once" for allow, "reject" for deny)
+{
+  const hooks8 = await plugin({ client: fakeClient }, cfg)
+  replies.length = 0
+
+  // Capture the requestId emitted by /v1/ask via a capturing fetch.
+  let capturedRequestId = null
+  const capturingFetch8 = async (url, ...rest) => {
+    const s = typeof url === "string" ? url : url.url
+    if (s.includes(":65535")) {
+      ntfyCalls++
+      throw new Error(`ECONNREFUSED ${s}`)
+    }
+    if (s.includes("/v1/ask")) {
+      const res = await origFetch(url, ...rest)
+      if (res.ok) {
+        const cloned = res.clone()
+        const body = await cloned.json().catch(() => null)
+        if (body?.requestId) capturedRequestId = body.requestId
+      }
+      return res
+    }
+    return origFetch(url, ...rest)
+  }
+  globalThis.fetch = capturingFetch8
+
+  const e8 = {
+    event: {
+      type: "permission.asked",
+      properties: {
+        id: "perm-ws12",
+        sessionID: "sess-ws12",
+        permission: "bash",
+        patterns: ["echo ws12"],
+        metadata: {},
+        always: [],
+        tool: { messageID: "msg-ws12", callID: "call-ws12" },
+      },
+    },
+  }
+  const ep8 = hooks8.event(e8)
+
+  // Poll for the captured requestId so we know broker.ask finished
+  // and pendingAskByPermissionId is populated.
+  const t0s8 = Date.now()
+  while (!capturedRequestId && Date.now() - t0s8 < 2000) {
+    await new Promise((r) => setTimeout(r, 25))
+  }
+  globalThis.fetch = origFetch
+
+  check(
+    "scenario 8: /v1/ask was called and we captured the requestId",
+    typeof capturedRequestId === "string" && capturedRequestId.length > 0,
+    { capturedRequestId }
+  )
+
+  // The broker should now show the requestId as pending.
+  if (capturedRequestId) {
+    const pendingRes = await origFetch(
+      `http://127.0.0.1:${brokerPort}/v1/pending`
+    )
+    const pendingBody = await pendingRes.json()
+    check(
+      "scenario 8: /v1/pending shows the requestId before recall",
+      pendingBody.pending.some((p) => p.requestId === capturedRequestId),
+      { pending: pendingBody.pending.map((p) => p.requestId) }
+    )
+  }
+
+  // Now fire permission.replied via the SAME hooks.event() channel.
+  // The plugin must call broker.recall() with the mapped decision.
+  await hooks8.event({
+    event: {
+      type: "permission.replied",
+      properties: {
+        sessionID: "sess-ws12",
+        permissionID: "perm-ws12",
+        response: "allow",
+      },
+    },
+  })
+
+  // The recall consumes the nonce; wait briefly for the broker to
+  // settle before asserting on /v1/pending.
+  await new Promise((r) => setTimeout(r, 100))
+
+  if (capturedRequestId) {
+    const pendingRes = await origFetch(
+      `http://127.0.0.1:${brokerPort}/v1/pending`
+    )
+    const pendingBody = await pendingRes.json()
+    check(
+      "scenario 8: /v1/pending no longer lists the requestId after permission.replied",
+      !pendingBody.pending.some((p) => p.requestId === capturedRequestId),
+      { pending: pendingBody.pending.map((p) => p.requestId) }
+    )
+  }
+
+  // The plugin's waitForDecision should resolve with the synthetic
+  // allow/once decision and trigger a replyToOpencode. Wait for the
+  // original event promise to complete so we observe that reply.
+  await ep8
+
+  check(
+    "scenario 8: plugin replied to opencode with 'once' for permission.replied=allow",
+    replies.length === 1 && replies[0].response === "once",
+    { replies }
+  )
+
+  await hooks8.dispose()
+}
+
 await hooks.dispose()
 await broker.stop()
 globalThis.fetch = origFetch

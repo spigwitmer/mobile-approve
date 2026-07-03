@@ -9,7 +9,12 @@ export type DecisionServer = {
   reviewUrl: (requestId: string, token: string) => string
   listen: () => Promise<{ port: number }>
   stop: () => Promise<void>
-  register: (requestId: string, snapshot: PermissionSnapshot, hmacSecret: string) => void
+  register: (
+    requestId: string,
+    snapshot: PermissionSnapshot,
+    hmacSecret: string,
+    messageId?: string
+  ) => void
   waitForDecision: (requestId: string, timeoutMs: number) => Promise<Decision>
   baseUrl: () => string
   port: () => number
@@ -202,7 +207,8 @@ export function createDecisionServer(deps: ServerDeps): DecisionServer {
   const register = (
     requestId: string,
     snapshot: PermissionSnapshot,
-    hmacSecret: string
+    hmacSecret: string,
+    messageId?: string
   ): void => {
     store.register(requestId, {
       resolve: () => {},
@@ -210,6 +216,7 @@ export function createDecisionServer(deps: ServerDeps): DecisionServer {
       createdAt: Date.now(),
       permission: snapshot,
       hmacSecret,
+      messageId,
     })
   }
 
@@ -243,6 +250,7 @@ export function createDecisionServer(deps: ServerDeps): DecisionServer {
         createdAt: existing.createdAt,
         permission: existing.permission,
         hmacSecret: existing.hmacSecret,
+        messageId: existing.messageId,
       })
     })
 

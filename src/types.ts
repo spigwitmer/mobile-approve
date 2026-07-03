@@ -121,6 +121,7 @@ export type Pending = {
   createdAt: number
   permission: PermissionSnapshot
   hmacSecret: string
+  messageId?: string
 }
 
 export type PublishInput = {

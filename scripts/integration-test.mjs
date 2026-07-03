@@ -328,6 +328,58 @@ function check(name, ok, info) {
   )
 }
 
+// --- Scenario 5: phone notifications off (phoneNotifications: false) ---
+//
+// When the user pre-sets phoneNotifications: false in opencode.json (or
+// toggles it via the in-TUI tool), the plugin's handlePermissionAsked
+// bails out BEFORE calling the broker. The in-TUI prompt takes over.
+// We verify that:
+//   - broker.ask is NOT called (no ntfy publish)
+//   - no reply is sent to opencode
+{
+  await hooks.dispose()
+  replies.length = 0
+  promptAsyncCalls.length = 0
+  ntfyCalls = 0
+  // Reload the plugin with phoneNotifications: false
+  const cfgOff = { ...cfg, phoneNotifications: false }
+  const hooksOff = await plugin({ client: fakeClient }, cfgOff)
+
+  const e5 = {
+    event: {
+      type: "permission.asked",
+      properties: {
+        id: "perm-silent",
+        sessionID: "sess-silent",
+        permission: "bash",
+        patterns: ["ls"],
+        metadata: {},
+        always: [],
+        tool: { messageID: "msg-silent", callID: "call-silent" },
+      },
+    },
+  }
+  await hooksOff.event(e5)
+  // Give the plugin a moment in case it were going to fire requests
+  await new Promise((r) => setTimeout(r, 50))
+  check(
+    "scenario 5: phoneNotifications=false -> broker.ask NOT called (no ntfy publish)",
+    ntfyCalls === 0,
+    { ntfyCalls }
+  )
+  check(
+    "scenario 5: phoneNotifications=false -> NO reply to opencode (in-TUI handles it)",
+    replies.length === 0,
+    { replies }
+  )
+  check(
+    "scenario 5: phoneNotifications=false -> sendAgentHint NOT called either",
+    promptAsyncCalls.length === 0,
+    { promptAsyncCalls }
+  )
+  await hooksOff.dispose()
+}
+
 await hooks.dispose()
 await broker.stop()
 globalThis.fetch = origFetch

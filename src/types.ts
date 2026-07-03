@@ -6,6 +6,7 @@ export type PluginOptions = {
   defaultTimeoutMs?: number
   hmacSecretEnv?: string
   nonceTtlMs?: number
+  phoneNotifications?: boolean
   ntfy?: {
     baseUrl: string
     topic: string
@@ -26,6 +27,7 @@ export type ResolvedConfig = {
   hmacSecretGenerated: boolean
   hmacSecretEnv: string
   nonceTtlMs: number
+  phoneNotifications: boolean
   ntfy: PluginOptions["ntfy"]
   tunnel: PluginOptions["tunnel"]
   logLevel: "debug" | "info" | "warn" | "error"
@@ -37,6 +39,7 @@ export const DEFAULTS: Required<Omit<PluginOptions, "ntfy" | "tunnel">> = {
   defaultTimeoutMs: 300_000,
   hmacSecretEnv: "MOBILE_APPROVE_SECRET",
   nonceTtlMs: 600_000,
+  phoneNotifications: true,
   logLevel: "info",
 }
 
@@ -72,6 +75,7 @@ export function resolveConfig(opts: PluginOptions = {}): ResolvedConfig {
     hmacSecretGenerated,
     hmacSecretEnv: envName,
     nonceTtlMs: opts.nonceTtlMs ?? DEFAULTS.nonceTtlMs,
+    phoneNotifications: opts.phoneNotifications ?? DEFAULTS.phoneNotifications,
     ntfy: opts.ntfy,
     tunnel: opts.tunnel,
     logLevel: opts.logLevel ?? DEFAULTS.logLevel,

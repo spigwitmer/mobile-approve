@@ -71,6 +71,10 @@ configs are ignored). The plugin needs:
   `https://<your-host>.tailnet.ts.net`).
 - `ntfy.*` — `baseUrl`, `topic`, `user`, `password` for the publish-only
   ntfy user. Set by `bin/setup-ntfy.sh`.
+- `phoneNotifications` (default `true`) — when `false`, the plugin
+  bails out before calling the broker and the in-TUI prompt handles
+  the ask instead. Can be toggled at runtime via the `mobile-approve`
+  tool (invoke from opencode's command palette, e.g. Ctrl+Shift+P).
 
 Plus the shell env `MOBILE_APPROVE_SECRET` — a base64-encoded random
 32-byte string used to sign review URLs. Both the plugin and the

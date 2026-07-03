@@ -1,5 +1,7 @@
 import type { Plugin } from "@opencode-ai/plugin"
+import { tool } from "@opencode-ai/plugin"
 import type { Permission } from "@opencode-ai/sdk"
+import { z } from "zod"
 import { resolveConfig, type PluginOptions } from "./types.js"
 import { BrokerClient } from "./client.js"
 
@@ -93,6 +95,13 @@ export default (async ({ client }, options?: PluginOptions) => {
   const broker = new BrokerClient({
     baseUrl: cfg.brokerBaseUrl,
   })
+
+  // In-memory toggle for the phone-notification path. The user can flip
+  // this from inside opencode via the `mobile-approve` tool (see the tool
+  // hook in the return value below), or pre-set it to false in their
+  // mobile-approve plugin entry in opencode.json to start with the in-TUI
+  // prompt as the default. State does not persist across opencode restarts.
+  let phoneNotificationsEnabled = cfg.phoneNotifications
 
   // Verify the broker is reachable on plugin load. Log a clear error and
   // continue without phone approval if it's not (the in-TUI prompt still
@@ -219,6 +228,18 @@ export default (async ({ client }, options?: PluginOptions) => {
     }
     seenRequestIds.add(input.id)
     setTimeout(() => seenRequestIds.delete(input.id), 5 * 60_000)
+
+    // Bail out if the user has toggled phone notifications off (via the
+    // `mobile-approve` tool, or via the phoneNotifications option in
+    // opencode.json). Don't call the broker, don't reply to opencode —
+    // the in-TUI prompt handles the ask.
+    if (!phoneNotificationsEnabled) {
+      log("info", "phone notifications off; in-TUI prompt will handle this ask", {
+        opencodeRequestId: input.id,
+        tool: input.type,
+      })
+      return
+    }
 
     const pattern = firstPattern(input.pattern)
 
@@ -406,6 +427,56 @@ export default (async ({ client }, options?: PluginOptions) => {
         }
         return
       }
+    },
+
+    // User-facing tool to toggle the phone-approval path. Accessible
+    // from opencode's command palette: search "mobile-approve".
+    tool: {
+      "mobile-approve": tool({
+        description:
+          "Toggle or check the phone-approval notification path. " +
+          "By default, permission asks are pushed to your phone via ntfy " +
+          "and you answer on a review page. Disable to use opencode's " +
+          "in-TUI prompt instead (no phone buzz). State is per-session and " +
+          "does not persist across opencode restarts.",
+        args: {
+          action: z
+            .enum(["enable", "disable", "toggle", "status"])
+            .describe(
+              "What to do: enable = turn phone notifications on; " +
+                "disable = turn them off (in-TUI prompt will handle " +
+                "permission asks); toggle = flip the current state; " +
+                "status = return the current state."
+            ),
+        },
+        execute: async (args) => {
+          const before = phoneNotificationsEnabled
+          let msg: string
+          switch (args.action) {
+            case "enable":
+              phoneNotificationsEnabled = true
+              msg = "phone notifications: ON"
+              break
+            case "disable":
+              phoneNotificationsEnabled = false
+              msg = "phone notifications: OFF (in-TUI prompt will handle permission asks)"
+              break
+            case "toggle":
+              phoneNotificationsEnabled = !before
+              msg = `phone notifications: ${phoneNotificationsEnabled ? "ON" : "OFF"}`
+              break
+            case "status":
+              msg = `phone notifications: ${phoneNotificationsEnabled ? "ON" : "OFF"}`
+              break
+          }
+          log("info", "phone notifications toggled", {
+            action: args.action,
+            before,
+            after: phoneNotificationsEnabled,
+          })
+          return msg
+        },
+      }),
     },
   }
 }) satisfies Plugin

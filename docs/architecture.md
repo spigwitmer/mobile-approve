@@ -219,3 +219,13 @@ The broker solves both:
 - **Synced whitelist across machines** (out of scope): the whitelist
   is local to the broker. Multi-machine setups share the broker, so
   this is fine in practice.
+
+## Done (small additions)
+
+- **WS9 (2026-07-02) — Toggle phone notifications**: the plugin
+  exposes a `mobile-approve` tool with `enable | disable | toggle |
+  status` actions. When toggled off, the plugin's `handlePermissionAsked`
+  bails out before calling the broker; opencode's in-TUI prompt
+  handles the ask instead. The toggle is in-memory per session; the
+  `phoneNotifications: false` option in the mobile-approve plugin
+  entry sets the initial value.

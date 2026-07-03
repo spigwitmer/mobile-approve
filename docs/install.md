@@ -244,6 +244,49 @@ Log in with the `pub-mobile-approve` user and the token from step 1.
 Subscribe to the topic from step 1. The phone will now buzz for every
 permission ask.
 
+### 5b. Toggling phone notifications (optional)
+
+Sometimes you don't want the phone to buzz — e.g. you're AFK and don't
+want a backlog, or you're doing non-sensitive work and the in-TUI
+prompt is enough.
+
+The plugin registers a tool called **`mobile-approve`** in opencode.
+Invoke it from opencode's command palette:
+
+- The keybind varies by surface (Ctrl+Shift+P in the desktop/web TUI
+  is the typical keybind; check opencode's settings).
+- Search for `mobile-approve` (or `phone`, or `approve`).
+- Pick an action: `enable`, `disable`, `toggle`, or `status`.
+- The tool returns a short status string ("phone notifications: ON" /
+  "OFF") and logs the change at INFO level to opencode's `mobile-approve`
+  service log.
+
+When phone notifications are off, the plugin bails out before calling
+the broker — opencode's in-TUI permission prompt takes over. No phone
+buzz, no review page, no broker roundtrip. The in-TUI prompt behaves
+exactly the way it would without the plugin installed.
+
+For a session-wide default, set `phoneNotifications: false` in the
+mobile-approve plugin entry in `~/.config/opencode/opencode.json`:
+
+```json
+{
+  "plugin": [
+    [
+      "/path/to/mobile-approve/src/index.ts",
+      {
+        "phoneNotifications": false,
+        "..."
+      }
+    ]
+  ]
+}
+```
+
+State is per-session (in-memory). Restarting opencode reverts to the
+default. The `mobile-approve` tool toggles the runtime state; the
+`opencode.json` option only sets the initial value.
+
 ### 6. Smoke test
 
 ```sh

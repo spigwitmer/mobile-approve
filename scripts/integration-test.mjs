@@ -810,13 +810,15 @@ function check(name, ok, info) {
 
   // Now fire permission.replied via the SAME hooks.event() channel.
   // The plugin must call broker.recall() with the mapped decision.
+  // The runtime emits {requestID, reply} (not {permissionID, response}
+  // as the SDK type claims). The plugin must read the real field names.
   await hooks8.event({
     event: {
       type: "permission.replied",
       properties: {
         sessionID: "sess-ws12",
-        permissionID: "perm-ws12",
-        response: "allow",
+        requestID: "perm-ws12",
+        reply: "once",
       },
     },
   })
@@ -849,6 +851,116 @@ function check(name, ok, info) {
   )
 
   await hooks8.dispose()
+}
+
+// --- Scenario 9 (timeout path): broker times out → TUI decides → recall ---
+//
+// Reproduces the production scenario: broker.ask succeeds, plugin awaits
+// waitForDecision, broker times out (defaultTimeoutMs = 250ms here),
+// plugin returns so opencode can show TUI prompt, user decides in TUI,
+// permission.replied arrives LATER. The map entry must survive the
+// timeout so the late permission.replied can still call broker.recall.
+//
+// With the old code, the `finally` block in handlePermissionAsked cleared
+// the map entry on timeout, so the late permission.replied would find
+// nothing and bail out without recalling.
+{
+  const timeoutCfg = { ...cfg, defaultTimeoutMs: 250 }
+  const hooks9 = await plugin({ client: fakeClient }, timeoutCfg)
+  replies.length = 0
+
+  let capturedRequestId9 = null
+  const capturingFetch9 = async (url, ...rest) => {
+    const s = typeof url === "string" ? url : url.url
+    if (s.includes(":65535")) {
+      ntfyCalls++
+      throw new Error(`ECONNREFUSED ${s}`)
+    }
+    if (s.includes("/v1/ask")) {
+      const res = await origFetch(url, ...rest)
+      if (res.ok) {
+        const cloned = res.clone()
+        const body = await cloned.json().catch(() => null)
+        if (body?.requestId) capturedRequestId9 = body.requestId
+      }
+      return res
+    }
+    return origFetch(url, ...rest)
+  }
+  globalThis.fetch = capturingFetch9
+
+  const ep9 = hooks9.event({
+    event: {
+      type: "permission.asked",
+      properties: {
+        id: "perm-timeout",
+        sessionID: "sess-timeout",
+        permission: "bash",
+        patterns: ["echo timeout"],
+        metadata: {},
+        always: [],
+        tool: { messageID: "msg-tmo", callID: "call-tmo" },
+      },
+    },
+  })
+
+  // Wait for broker.ask to finish and the map to be populated.
+  const t0s9 = Date.now()
+  while (!capturedRequestId9 && Date.now() - t0s9 < 2000) {
+    await new Promise((r) => setTimeout(r, 25))
+  }
+  globalThis.fetch = origFetch
+
+  check(
+    "scenario 9: /v1/ask was called and requestId captured",
+    typeof capturedRequestId9 === "string" && capturedRequestId9.length > 0,
+    { capturedRequestId9 }
+  )
+
+  // Wait past the broker timeout (250ms + buffer) so handlePermissionAsked
+  // returns from the catch block. The map entry MUST survive this — the
+  // test asserts the late permission.replied still triggers a recall.
+  await new Promise((r) => setTimeout(r, 400))
+
+  // Fire permission.replied AFTER the timeout — this is the late TUI
+  // decision. With the buggy `finally` block the map would be empty and
+  // recall would be skipped.
+  await hooks9.event({
+    event: {
+      type: "permission.replied",
+      properties: {
+        sessionID: "sess-timeout",
+        requestID: "perm-timeout",
+        reply: "reject",
+      },
+    },
+  })
+
+  // Give the recall a moment to propagate to the broker.
+  await new Promise((r) => setTimeout(r, 100))
+
+  if (capturedRequestId9) {
+    const pendingRes = await origFetch(
+      `http://127.0.0.1:${brokerPort}/v1/pending`
+    )
+    const pendingBody = await pendingRes.json()
+    check(
+      "scenario 9: late TUI reply after broker timeout still triggers recall",
+      !pendingBody.pending.some((p) => p.requestId === capturedRequestId9),
+      { pending: pendingBody.pending.map((p) => p.requestId) }
+    )
+  }
+
+  // The plugin must NOT auto-reply in the timeout path (opencode will
+  // handle the TUI prompt itself).
+  await ep9
+  check(
+    "scenario 9: plugin did NOT auto-reply in timeout path (TUI takes over)",
+    replies.length === 0,
+    { replies }
+  )
+
+  await hooks9.dispose()
 }
 
 await hooks.dispose()

@@ -208,7 +208,22 @@ export default (async ({ client }, options?: PluginOptions) => {
   // permission before the phone does, the permission.replied event
   // hook uses this map to call broker.recall() so the published ntfy
   // message is deleted and any leftover waitForDecision waiter resolves.
+  //
+  // The map survives broker timeouts: if the phone doesn't reply in time
+  // and opencode falls back to its TUI prompt, the user may decide there
+  // many seconds later. We must still be able to recall the ntfy message
+  // at that point. Only the success path (where opencode has already
+  // accepted the plugin's reply) and the permission.replied event hook
+  // delete entries.
   const pendingAskByPermissionId = new Map<string, string>()
+  const PENDING_MAX_ENTRIES = 4096
+  function setPending(pid: string, rid: string): void {
+    pendingAskByPermissionId.set(pid, rid)
+    if (pendingAskByPermissionId.size > PENDING_MAX_ENTRIES) {
+      const oldest = pendingAskByPermissionId.keys().next().value
+      if (oldest !== undefined) pendingAskByPermissionId.delete(oldest)
+    }
+  }
 
   async function replyToOpencode(
     sessionID: string,
@@ -391,7 +406,7 @@ export default (async ({ client }, options?: PluginOptions) => {
     }
 
     // Register so a permission.replied event can recall the ntfy message.
-    pendingAskByPermissionId.set(input.id, requestId)
+    setPending(input.id, requestId)
     try {
       const decision = await broker.waitForDecision(
         requestId,
@@ -419,6 +434,10 @@ export default (async ({ client }, options?: PluginOptions) => {
         response,
         "phone-decision"
       )
+      // Success path: opencode has accepted the reply, the
+      // permission.replied event will NOT fire for this permission.
+      // Clean up here so the map doesn't grow unbounded across many asks.
+      pendingAskByPermissionId.delete(input.id)
 
       if (decision.status === "allow" && decision.scope === "always") {
         const p =
@@ -440,7 +459,10 @@ export default (async ({ client }, options?: PluginOptions) => {
       }
     } catch (err) {
       // Phone didn't respond in time (default 5 min). Let the in-TUI prompt
-      // handle it rather than silently denying the action.
+      // handle it rather than silently denying the action. The map entry
+      // STAYS so that when permission.replied eventually fires, the
+      // event hook can still call broker.recall() to delete the published
+      // ntfy message and consume the nonce.
       const reason = err instanceof Error ? err.message : String(err)
       log(
         "warn",
@@ -454,13 +476,6 @@ export default (async ({ client }, options?: PluginOptions) => {
         }
       )
       return
-    } finally {
-      // Whether the phone responded, timed out, or the broker failed,
-      // this permission id is no longer "pending recall". If the TUI
-      // already replied, the event hook will have removed us; if it
-      // fires after this point, it'll see no entry and bail out (which
-      // is correct — opencode has already decided, nothing to recall).
-      pendingAskByPermissionId.delete(input.id)
     }
   }
 
@@ -509,21 +524,57 @@ export default (async ({ client }, options?: PluginOptions) => {
       }
 
       if (evt.type === "permission.replied") {
+        // The V1 SDK type at node_modules/@opencode-ai/sdk/dist/gen/types.gen.d.ts
+        // declares {permissionID, response}, but the runtime at /usr/bin/opencode
+        // (Permission.reply) actually emits {requestID, reply}. Read both with
+        // a runtime-wins preference so we keep working if the SDK type gets fixed.
         const props = evt.properties as {
-          sessionID: string
-          permissionID: string
-          response: string
+          sessionID?: string
+          requestID?: string
+          reply?: string
+          permissionID?: string
+          response?: string
         }
-        const requestId = pendingAskByPermissionId.get(props.permissionID)
-        if (!requestId) return
-        pendingAskByPermissionId.delete(props.permissionID)
-        const decision =
-          props.response === "allow"
-            ? { status: "allow" as const, scope: "once" as const }
-            : { status: "deny" as const, scope: "once" as const }
+        log("debug", "permission.replied raw", {
+          keys: Object.keys(props),
+          payload: props,
+        })
+        const permissionID = props.requestID ?? props.permissionID
+        if (!permissionID) return
+        const requestId = pendingAskByPermissionId.get(permissionID)
+        if (!requestId) {
+          log("debug", "permission.replied for unknown permission; ignore", {
+            permissionID,
+            mapSize: pendingAskByPermissionId.size,
+          })
+          return
+        }
+        pendingAskByPermissionId.delete(permissionID)
+        const reply = props.reply ?? props.response ?? ""
+        let decision: { status: "allow" | "deny"; scope: "once" | "always" }
+        let decisionLabel: string
+        if (reply === "always") {
+          decision = { status: "allow", scope: "always" }
+          decisionLabel = "tui allow always"
+        } else if (reply === "once") {
+          decision = { status: "allow", scope: "once" }
+          decisionLabel = "tui allow once"
+        } else if (reply === "reject") {
+          decision = { status: "deny", scope: "once" }
+          decisionLabel = "tui deny"
+        } else {
+          decision = { status: "deny", scope: "once" }
+          decisionLabel = `tui unknown reply=${JSON.stringify(reply)} → deny`
+        }
+        log("info", "permission.replied decision mapped", {
+          permissionID,
+          requestId,
+          reply,
+          decisionLabel,
+        })
         try {
           const r = await broker.recall(requestId, decision)
-          log("info", "tui decision → recalled ntfy", {
+          log("info", `${decisionLabel} → recalled ntfy`, {
             requestId,
             status: r.status,
           })

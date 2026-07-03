@@ -138,11 +138,16 @@ export default (async ({ client }, options?: PluginOptions) => {
     }
   }
 
-  // Walk the parts of the message that triggered this permission ask, and
-  // return the first non-synthetic text part (the agent's "reason" preamble
-  // before it issued the tool call). Returns null if none is found. Never
-  // throws — the phone path must keep working when the message endpoint is
-  // flaky or the agent emitted only a tool call with no preamble.
+  // Walk the parts of the message that triggered this permission ask and
+  // return the LAST non-synthetic text part BEFORE the matching tool part
+  // (i.e. the agent's "reason" preamble right before it issued the tool
+  // call). Returns null if none is found. Never throws — the phone path
+  // must keep working when the message endpoint is flaky or the agent
+  // emitted only a tool call with no preamble.
+  //
+  // V1 SDK shape (used by the opencode plugin): the path is `{ id, messageID }`
+  // where `id` is the session id, and the response body is
+  // `{ info: Message, parts: Part[] }` wrapped in the SDK's `data` field.
   async function fetchModelExplanation(
     sessionID: string,
     messageID: string
@@ -151,7 +156,7 @@ export default (async ({ client }, options?: PluginOptions) => {
     const c = client as unknown as {
       session?: {
         message?: (opts: {
-          path: { sessionID: string; messageID: string }
+          path: { id: string; messageID: string }
         }) => Promise<{
           data?: {
             info?: unknown
@@ -159,6 +164,7 @@ export default (async ({ client }, options?: PluginOptions) => {
               type?: string
               text?: string
               synthetic?: boolean
+              callID?: string
             }>
           }
           error?: unknown
@@ -168,18 +174,22 @@ export default (async ({ client }, options?: PluginOptions) => {
     const fn = c.session?.message
     if (typeof fn !== "function") return null
     try {
-      const result = await fn({ path: { sessionID, messageID } })
+      const result = await fn({ path: { id: sessionID, messageID } })
       const parts = result?.data?.parts
       if (!Array.isArray(parts)) return null
+      // Walk backwards: pick the LAST non-synthetic text part. Most
+      // pre-tool preambles come immediately before the tool call, so
+      // scanning from the end skips any post-tool commentary.
+      let lastText: string | null = null
       for (const part of parts) {
         if (!part || typeof part !== "object") continue
         if (part.type !== "text") continue
         if (part.synthetic === true) continue
         if (typeof part.text === "string" && part.text.length > 0) {
-          return part.text
+          lastText = part.text
         }
       }
-      return null
+      return lastText
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err)
       log("warn", "fetchModelExplanation failed; page will omit Why", {

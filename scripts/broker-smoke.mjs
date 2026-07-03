@@ -673,7 +673,7 @@ async function askAndFetchReview(body) {
   )
 }
 
-// 11. /v1/ask with modelExplanation renders <blockquote class="why">
+// 11. /v1/ask with modelExplanation renders a dedicated "explanation" box
 {
   const { html, status } = await askAndFetchReview({
     sessionID: "sess-why",
@@ -685,14 +685,16 @@ async function askAndFetchReview(body) {
   })
   check("review page returns 200 for why ask", status === 200, { status })
   check(
-    "modelExplanation renders as <blockquote class=\"why\">",
-    html.includes('<blockquote class="why">'),
-    { hasWhy: html.includes('<blockquote class="why">') }
+    "modelExplanation renders as a dedicated explanation box (label + pre.explanation)",
+    html.includes('>explanation</div>') &&
+      html.includes('<pre class="explanation">'),
+    { hasLabel: html.includes('>explanation</div>'), hasPre: html.includes('<pre class="explanation">') }
   )
   check(
-    "modelExplanation includes the 'Why:' label",
-    html.includes("<strong>Why:</strong>"),
-    { hasLabel: html.includes("<strong>Why:</strong>") }
+    "modelExplanation is rendered as a peer of tool/pattern/metadata (inside the same panel)",
+    // both <pre>explanation and <pre>tool should be inside the same .panel
+    /<div class="panel">[\s\S]*<div class="label">tool<\/div>[\s\S]*<pre class="explanation">/.test(html),
+    { samePanel: /<pre class="explanation">[\s\S]{0,200}<pre>/.test(html) }
   )
   check(
     "modelExplanation contains the provided text",
@@ -721,9 +723,10 @@ async function askAndFetchReview(body) {
   })
   check("review page returns 200 for plain ask", status === 200, { status })
   check(
-    "plain ask has NO <blockquote class=\"why\">",
-    !html.includes('<blockquote class="why">'),
-    { hasWhy: html.includes('<blockquote class="why">') }
+    "plain ask shows explanation box with 'none given' fallback",
+    html.includes('<pre class="explanation">') &&
+      html.includes("none given"),
+    { hasNoneGiven: html.includes("none given") }
   )
   check(
     "plain ask has NO <pre class=\"diff\">",

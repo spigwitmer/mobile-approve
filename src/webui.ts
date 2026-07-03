@@ -90,7 +90,13 @@ function renderFileDiff(
 }
 
 function renderWhy(text: string): string {
-  return `<blockquote class="why"><strong>Why:</strong> ${escapeHtml(text)}</blockquote>`
+  // Dedicated "explanation" box: same structure as the "tool", "pattern",
+  // "metadata", and "diff" sections below. A labeled <pre>-style box with
+  // prose wrapping, visually distinguishable as the agent's own narration.
+  return (
+    `<div class="label" style="margin-top:8px">explanation</div>` +
+    `<pre class="explanation">${escapeHtml(text)}</pre>`
+  )
 }
 
 export function renderReviewPage(input: {
@@ -125,10 +131,16 @@ export function renderReviewPage(input: {
   }
   const metadata = formatMetadata(permission.metadata, suppressedMetadataKeys)
   const expired = Date.now() > expiresAtMs
-  const whyHtml =
-    permission.modelExplanation && permission.modelExplanation.length > 0
-      ? renderWhy(permission.modelExplanation)
-      : ""
+  // Always render the explanation box. If the plugin couldn't fetch
+  // the model's preamble (opencode not restarted, fetchModelExplanation
+  // threw, or the agent emitted no preceding text), fall back to a
+  // visible "none given" placeholder so the user can tell the field is
+  // there but empty, rather than wondering if the box is missing.
+  const explanationText =
+    permission.modelExplanation && permission.modelExplanation.trim().length > 0
+      ? permission.modelExplanation
+      : "none given"
+  const whyHtml = renderWhy(explanationText)
   const diffHtml =
     permission.diff && permission.diff.length > 0
       ? `<div class="label" style="margin-top:8px">diff</div><pre class="diff">${renderDiff(permission.diff)}</pre>`
@@ -213,14 +225,20 @@ export function renderReviewPage(input: {
   }
   details > summary::-webkit-details-marker { display: none; }
   details[open] > summary { margin-bottom: 8px; }
-  .why {
-    margin: 0 0 12px;
-    padding: 8px 12px;
-    border-left: 3px solid #2563eb;
+  .explanation {
+    /* Dedicated box for the agent's "explanation" — same shape as
+       tool/pattern/metadata/diff but visually distinct: blue accent
+       border, prose-friendly background, normal whitespace. */
     background: #11121a;
-    border-radius: 6px;
+    border-left: 3px solid #2563eb;
     color: #c7c9d1;
     font-size: 13px;
+    padding: 10px;
+    border-radius: 8px;
+    white-space: pre-wrap;
+    word-break: break-word;
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
   }
   .diff { white-space: pre; word-break: normal; }
   .diff .add { color: #7ee787; }
@@ -241,7 +259,6 @@ export function renderReviewPage(input: {
 <body>
 <h1>opencode wants to act</h1>
 <div class="sub">${title}</div>
-${whyHtml}
 
 <div class="panel">
   <div class="label">tool</div>
@@ -258,6 +275,7 @@ ${whyHtml}
       ? `<div class="label" style="margin-top:8px">metadata</div><pre>${metadata}</pre>`
       : ""
   }
+  ${whyHtml}
   ${diffHtml}
   ${filediffHtml}
 </div>

@@ -536,12 +536,13 @@ function check(name, ok, info) {
     const reviewHtml = await reviewRes.text()
 
     check(
-      "scenario 6: review page rendered with <blockquote class=\"why\">",
-      reviewHtml.includes('<blockquote class="why">'),
-      { snippet: reviewHtml.match(/<blockquote class="why">[^<]{0,80}/)?.[0] }
+      "scenario 6: review page rendered with explanation label and pre",
+      reviewHtml.includes('>explanation</div>') &&
+        reviewHtml.includes('<pre class="explanation">'),
+      { snippet: reviewHtml.match(/<pre class="explanation">[^<]{0,80}/)?.[0] }
     )
     check(
-      "scenario 6: review page Why blockquote contains the preamble text",
+      "scenario 6: review page explanation box contains the preamble text",
       reviewHtml.includes("I am rewriting the login helper"),
       { contains: reviewHtml.includes("I am rewriting the login helper") }
     )
@@ -717,9 +718,10 @@ function check(name, ok, info) {
   const reviewHtml = await reviewRes.text()
 
   check(
-    "scenario 7: review page rendered WITHOUT <blockquote class=\"why\"> (no preamble available)",
-    !reviewHtml.includes('<blockquote class="why">'),
-    { hasWhy: reviewHtml.includes('<blockquote class="why">') }
+    "scenario 7: review page rendered WITH explanation box showing 'none given' (no preamble available)",
+    reviewHtml.includes('<pre class="explanation">') &&
+      reviewHtml.includes("none given"),
+    { hasNoneGiven: reviewHtml.includes("none given") }
   )
 
   // Restore the original mock for cleanliness.

@@ -1,6 +1,6 @@
 [Unit]
 Description=mobile-approve broker
-Documentation=https://github.com/getpaseo/mobile-approve
+Documentation=https://github.com/spigwitmer/mobile-approve
 After=network.target
 # If the user uses Tailscale Serve to expose the review URL, the broker
 # doesn't depend on tailscaled directly (it just binds to 127.0.0.1).
